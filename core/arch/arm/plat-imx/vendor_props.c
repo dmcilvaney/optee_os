@@ -24,9 +24,9 @@ static TEE_Result get_prop_endorsement(struct tee_ta_session *sess,
 	void *ctx = NULL;
 	uint8_t die_id[TEE_SHA256_HASH_SIZE];
 	uint8_t digest[TEE_SHA512_HASH_SIZE];
-	TEE_Result res;
-	struct tee_hw_unique_key hwkey;
-	const TEE_UUID *uuid;
+	struct tee_hw_unique_key hwkey = {0};
+	TEE_Result res = TEE_SUCCESS;
+	const TEE_UUID *uuid = NULL;
 
 	EMSG("Generating a new endorsement seed for the fTPM");
 
