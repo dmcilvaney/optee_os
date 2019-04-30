@@ -45,24 +45,24 @@ static TEE_Result get_prop_endorsement(struct tee_ta_session *sess,
 	res = crypto_hash_init(ctx, algo);
 	if (res)
 		goto out;
-	
+
 	// Gather the data to hash
 	uuid = &(sess->ctx->uuid);
-	res = crypto_hash_update(ctx, algo, (uint8_t*)uuid, sizeof(*uuid));
+	res = crypto_hash_update(ctx, algo, (uint8_t *)uuid, sizeof(*uuid));
 	if (res)
 		goto out;
 
 	res = tee_otp_get_hw_unique_key(&hwkey);
 	if (res)
 		goto out;
-	res = crypto_hash_update(ctx, algo, (uint8_t*)&hwkey, sizeof(hwkey));
+	res = crypto_hash_update(ctx, algo, (uint8_t *)&hwkey, sizeof(hwkey));
 	if (res)
 		goto out;
 
 	res = tee_otp_get_die_id(die_id, sizeof(die_id));
 	if (res)
 		goto out;
-	res = crypto_hash_update(ctx, algo, (uint8_t*)die_id, sizeof(die_id));
+	res = crypto_hash_update(ctx, algo, (uint8_t *)die_id, sizeof(die_id));
 	if (res)
 		goto out;
 

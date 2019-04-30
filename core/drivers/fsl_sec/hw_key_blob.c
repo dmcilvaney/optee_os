@@ -147,9 +147,8 @@ TEE_Result get_hw_unq_key_blob_hw(uint8_t *hw_key, int size)
 
 	// The only useful data is the BKEK, which composes the
 	// first 32 bytes.
-	if (size > KEY_BLOB_SIZE) {
+	if (size > KEY_BLOB_SIZE)
 		return TEE_ERROR_BAD_PARAMETERS;
-	}
 
 	key_data = memalign(64, key_sz);
 
@@ -223,31 +222,37 @@ clean_up:
 
 TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
 {
-	TEE_Result res;
+	TEE_Result res = TEE_SUCCESS;
 	uint8_t temp_buffer[KEY_BLOB_SIZE];
+
+	COMPILE_TIME_ASSERT(KEY_BLOB_SIZE > HW_UNIQUE_KEY_LENGTH);
 
 	res = init_and_roll_forward_master_key();
 	if (res != TEE_SUCCESS) {
 		EMSG("Failed to init normal priblob otpmk identity from CAAM");
-		return res;
+		goto out;
 	}
 
 	// Use the first 16 bytes for the HUK, the last 16 for the die ID.
 	res = get_hw_unq_key_blob_hw(temp_buffer, KEY_BLOB_SIZE);
+
+	if (res != TEE_SUCCESS)
+		goto out;
+
 	memcpy(&hwkey->data[0], temp_buffer, HW_UNIQUE_KEY_LENGTH);
 
-	if (res != TEE_SUCCESS) {
+out:
+	if (res != TEE_SUCCESS)
 		EMSG("Hardware Unique Key Failed");
-	} else {
+	else
 		DMSG("Hardware Unique Key Retrieved:");
-	}
 
 	return res;
 }
 
 int tee_otp_get_die_id(uint8_t *buffer, size_t len)
 {
-	TEE_Result res;
+	TEE_Result res = TEE_SUCCESS;
 	uint8_t temp_buffer[KEY_BLOB_SIZE];
 	uint8_t *remaining_buffer = &(temp_buffer[HW_UNIQUE_KEY_LENGTH]);
 	uint32_t remaining_size = KEY_BLOB_SIZE - HW_UNIQUE_KEY_LENGTH;
@@ -256,26 +261,30 @@ int tee_otp_get_die_id(uint8_t *buffer, size_t len)
 	COMPILE_TIME_ASSERT(KEY_BLOB_SIZE > HW_UNIQUE_KEY_LENGTH);
 
 	if (len > TEE_SHA256_HASH_SIZE) {
-		return TEE_ERROR_BAD_PARAMETERS;
+		res = TEE_ERROR_BAD_PARAMETERS;
+		goto out;
 	}
 
 	res = init_and_roll_forward_master_key();
 	if (res != TEE_SUCCESS) {
 		EMSG("Failed to init normal priblob otpmk identity from CAAM");
-		return res;
+		goto out;
 	}
 
 	// Use the first 16 bytes for the HUK, the last 16 for the die ID.
 	res = get_hw_unq_key_blob_hw(temp_buffer, KEY_BLOB_SIZE);
 
+	if (res != TEE_SUCCESS)
+		goto out;
+
 	res = tee_hash_createdigest(TEE_ALG_SHA256, remaining_buffer, remaining_size,
 				buffer, len);
 
-	if (res != TEE_SUCCESS) {
+out:
+	if (res != TEE_SUCCESS)
 		EMSG("Die ID Failed");
-	} else {
+	else
 		DMSG("Die ID Retrieved:");
-	}
 
 	return res;
 }
