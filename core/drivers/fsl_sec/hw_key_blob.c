@@ -230,6 +230,13 @@ TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
 	res = init_and_roll_forward_master_key();
 	if (res != TEE_SUCCESS) {
 		EMSG("Failed to init normal priblob otpmk identity from CAAM");
+#ifdef CFG_RPMB_TESTKEY
+		EMSG("\t**** tee_otp_get_hw_unique_key() is INSECURE! ****");
+		EMSG("\t**** CAAM not available (HAB not enabled?) ****");
+		EMSG("\t**** Returning zero buffer because CFG_RPMB_TESTKEY=y ****");
+		memset(&hwkey->data[0], 0, HW_UNIQUE_KEY_LENGTH);
+		res = TEE_SUCCESS;
+#endif
 		goto out;
 	}
 
@@ -243,9 +250,9 @@ TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
 
 out:
 	if (res != TEE_SUCCESS)
-		EMSG("Hardware Unique Key Failed");
+		EMSG("Hardware Unique Key failed");
 	else
-		DMSG("Hardware Unique Key Retrieved:");
+		DMSG("Hardware Unique Key retrieved");
 
 	return res;
 }
@@ -268,6 +275,13 @@ int tee_otp_get_die_id(uint8_t *buffer, size_t len)
 	res = init_and_roll_forward_master_key();
 	if (res != TEE_SUCCESS) {
 		EMSG("Failed to init normal priblob otpmk identity from CAAM");
+#ifdef CFG_RPMB_TESTKEY
+		EMSG("\t**** tee_otp_get_die_id() is INSECURE! ****");
+		EMSG("\t**** CAAM not available (HAB not enabled?) ****");
+		EMSG("\t**** Returning zero buffer because CFG_RPMB_TESTKEY=y ****");
+		memset(buffer, 0, len);
+		res = TEE_SUCCESS;
+#endif
 		goto out;
 	}
 
@@ -277,14 +291,14 @@ int tee_otp_get_die_id(uint8_t *buffer, size_t len)
 	if (res != TEE_SUCCESS)
 		goto out;
 
-	res = tee_hash_createdigest(TEE_ALG_SHA256, remaining_buffer, remaining_size,
-				buffer, len);
+	res = tee_hash_createdigest(TEE_ALG_SHA256, remaining_buffer,
+				remaining_size, buffer, len);
 
 out:
 	if (res != TEE_SUCCESS)
-		EMSG("Die ID Failed");
+		EMSG("Die ID failed");
 	else
-		DMSG("Die ID Retrieved:");
+		DMSG("Die ID retrieved");
 
 	return res;
 }
