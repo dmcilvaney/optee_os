@@ -8,6 +8,7 @@
 #include <assert.h>
 #include <kernel/panic.h>
 #include <kernel/spinlock.h>
+#include <kernel/virtualization.h>
 #include <kernel/tee_common.h>
 #include <kernel/tee_misc.h>
 #include <kernel/tlb_helpers.h>
@@ -94,13 +95,78 @@ static vaddr_t select_va_in_range(vaddr_t prev_end, uint32_t prev_attr,
 	return 0;
 }
 
+static size_t get_num_req_pgts(struct user_ta_ctx *utc, vaddr_t *begin,
+			       vaddr_t *end)
+{
+	vaddr_t b;
+	vaddr_t e;
+
+	if (TAILQ_EMPTY(&utc->vm_info->regions)) {
+		core_mmu_get_user_va_range(&b, NULL);
+		e = b;
+	} else {
+		struct vm_region *r;
+
+		b = TAILQ_FIRST(&utc->vm_info->regions)->va;
+		r = TAILQ_LAST(&utc->vm_info->regions, vm_region_head);
+		e = r->va + r->size;
+		b = ROUNDDOWN(b, CORE_MMU_PGDIR_SIZE);
+		e = ROUNDUP(e, CORE_MMU_PGDIR_SIZE);
+	}
+
+	if (begin)
+		*begin = b;
+	if (end)
+		*end = e;
+	return (e - b) >> CORE_MMU_PGDIR_SHIFT;
+}
+
+static TEE_Result alloc_pgt(struct user_ta_ctx *utc)
+{
+	struct thread_specific_data *tsd __maybe_unused;
+	vaddr_t b;
+	vaddr_t e;
+	size_t ntbl;
+
+	ntbl = get_num_req_pgts(utc, &b, &e);
+	if (!pgt_check_avail(ntbl)) {
+		EMSG("%zu page tables not available", ntbl);
+		return TEE_ERROR_OUT_OF_MEMORY;
+	}
+
+#ifdef CFG_PAGED_USER_TA
+	tsd = thread_get_tsd();
+	if (&utc->ctx == tsd->ctx) {
+		/*
+		 * The supplied utc is the current active utc, allocate the
+		 * page tables too as the pager needs to use them soon.
+		 */
+		pgt_alloc(&tsd->pgt_cache, &utc->ctx, b, e - 1);
+	}
+#endif
+
+	return TEE_SUCCESS;
+}
+
+static void free_pgt(struct user_ta_ctx *utc, vaddr_t base, size_t size)
+{
+	struct thread_specific_data *tsd = thread_get_tsd();
+	struct pgt_cache *pgt_cache = NULL;
+
+	if (&utc->ctx == tsd->ctx)
+		pgt_cache = &tsd->pgt_cache;
+
+	pgt_flush_ctx_range(pgt_cache, &utc->ctx, base, base + size);
+}
+
 static TEE_Result umap_add_region(struct vm_info *vmi, struct vm_region *reg)
 {
-	struct vm_region *r;
-	struct vm_region *prev_r;
-	vaddr_t va_range_base;
-	size_t va_range_size;
-	vaddr_t va;
+	struct vm_region *r = NULL;
+	struct vm_region *prev_r = NULL;
+	vaddr_t va_range_base = 0;
+	size_t va_range_size = 0;
+	vaddr_t va = 0;
+	size_t offs_plus_size = 0;
 
 	core_mmu_get_user_va_range(&va_range_base, &va_range_size);
 
@@ -109,8 +175,9 @@ static TEE_Result umap_add_region(struct vm_info *vmi, struct vm_region *reg)
 		return TEE_ERROR_ACCESS_CONFLICT;
 
 	/* Check that the mobj is defined for the entire range */
-	if ((reg->offset + reg->size) >
-	     ROUNDUP(reg->mobj->size, SMALL_PAGE_SIZE))
+	if (ADD_OVERFLOW(reg->offset, reg->size, &offs_plus_size))
+		return TEE_ERROR_BAD_PARAMETERS;
+	if (offs_plus_size > ROUNDUP(reg->mobj->size, SMALL_PAGE_SIZE))
 		return TEE_ERROR_BAD_PARAMETERS;
 
 	prev_r = NULL;
@@ -158,32 +225,6 @@ static TEE_Result umap_add_region(struct vm_info *vmi, struct vm_region *reg)
 	return TEE_ERROR_ACCESS_CONFLICT;
 }
 
-static size_t get_num_req_pgts(struct user_ta_ctx *utc, vaddr_t *begin,
-			       vaddr_t *end)
-{
-	vaddr_t b;
-	vaddr_t e;
-
-	if (TAILQ_EMPTY(&utc->vm_info->regions)) {
-		core_mmu_get_user_va_range(&b, NULL);
-		e = b;
-	} else {
-		struct vm_region *r;
-
-		b = TAILQ_FIRST(&utc->vm_info->regions)->va;
-		r = TAILQ_LAST(&utc->vm_info->regions, vm_region_head);
-		e = r->va + r->size;
-		b = ROUNDDOWN(b, CORE_MMU_PGDIR_SIZE);
-		e = ROUNDUP(e, CORE_MMU_PGDIR_SIZE);
-	}
-
-	if (begin)
-		*begin = b;
-	if (end)
-		*end = e;
-	return (e - b) >> CORE_MMU_PGDIR_SHIFT;
-}
-
 TEE_Result vm_map(struct user_ta_ctx *utc, vaddr_t *va, size_t len,
 		  uint32_t prot, struct mobj *mobj, size_t offs)
 {
@@ -223,10 +264,9 @@ TEE_Result vm_map(struct user_ta_ctx *utc, vaddr_t *va, size_t len,
 	if (res)
 		goto err_free_reg;
 
-	if (!pgt_check_avail(get_num_req_pgts(utc, NULL, NULL))) {
-		res = TEE_ERROR_OUT_OF_MEMORY;
+	res = alloc_pgt(utc);
+	if (res)
 		goto err_rem_reg;
-	}
 
 	if (!(reg->attr & (TEE_MATTR_EPHEMERAL | TEE_MATTR_PERMANENT)) &&
 	    mobj_is_paged(mobj)) {
@@ -334,44 +374,6 @@ TEE_Result vm_info_init(struct user_ta_ctx *utc)
 	if (res)
 		vm_info_final(utc);
 	return res;
-}
-
-static TEE_Result alloc_pgt(struct user_ta_ctx *utc)
-{
-	struct thread_specific_data *tsd __maybe_unused;
-	vaddr_t b;
-	vaddr_t e;
-	size_t ntbl;
-
-	ntbl = get_num_req_pgts(utc, &b, &e);
-	if (!pgt_check_avail(ntbl)) {
-		EMSG("%zu page tables not available", ntbl);
-		return TEE_ERROR_OUT_OF_MEMORY;
-	}
-
-#ifdef CFG_PAGED_USER_TA
-	tsd = thread_get_tsd();
-	if (&utc->ctx == tsd->ctx) {
-		/*
-		 * The supplied utc is the current active utc, allocate the
-		 * page tables too as the pager needs to use them soon.
-		 */
-		pgt_alloc(&tsd->pgt_cache, &utc->ctx, b, e - 1);
-	}
-#endif
-
-	return TEE_SUCCESS;
-}
-
-static void free_pgt(struct user_ta_ctx *utc, vaddr_t base, size_t size)
-{
-	struct thread_specific_data *tsd = thread_get_tsd();
-	struct pgt_cache *pgt_cache = NULL;
-
-	if (&utc->ctx == tsd->ctx)
-		pgt_cache = &tsd->pgt_cache;
-
-	pgt_flush_ctx_range(pgt_cache, &utc->ctx, base, base + size);
 }
 
 static void umap_remove_region(struct vm_info *vmi, struct vm_region *reg)
@@ -758,10 +760,11 @@ TEE_Result tee_mmu_check_access_rights(const struct user_ta_ctx *utc,
 				       size_t len)
 {
 	uaddr_t a;
+	uaddr_t end_addr = 0;
 	size_t addr_incr = MIN(CORE_MMU_USER_CODE_SIZE,
 			       CORE_MMU_USER_PARAM_SIZE);
 
-	if (ADD_OVERFLOW(uaddr, len, &a))
+	if (ADD_OVERFLOW(uaddr, len, &end_addr))
 		return TEE_ERROR_ACCESS_DENIED;
 
 	if ((flags & TEE_MEMORY_ACCESS_NONSECURE) &&
@@ -776,7 +779,7 @@ TEE_Result tee_mmu_check_access_rights(const struct user_ta_ctx *utc,
 	   !tee_mmu_is_vbuf_inside_ta_private(utc, (void *)uaddr, len))
 		return TEE_ERROR_ACCESS_DENIED;
 
-	for (a = uaddr; a < (uaddr + len); a += addr_incr) {
+	for (a = ROUNDDOWN(uaddr, addr_incr); a < end_addr; a += addr_incr) {
 		uint32_t attr;
 		TEE_Result res;
 
@@ -841,7 +844,11 @@ void teecore_init_ta_ram(void)
 
 	/* get virtual addr/size of RAM where TA are loaded/executedNSec
 	 * shared mem allcated from teecore */
+#ifndef CFG_VIRTUALIZATION
 	core_mmu_get_mem_by_type(MEM_AREA_TA_RAM, &s, &e);
+#else
+	virt_get_ta_ram(&s, &e);
+#endif
 	ps = virt_to_phys((void *)s);
 	pe = virt_to_phys((void *)(e - 1)) + 1;
 

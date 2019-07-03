@@ -6,6 +6,7 @@
 
 #include <assert.h>
 #include <compiler.h>
+#include <crypto/crypto.h>
 #include <ctype.h>
 #include <initcall.h>
 #include <keep.h>
@@ -21,7 +22,6 @@
 #include <mm/tee_mm.h>
 #include <mm/tee_mmu.h>
 #include <mm/tee_pager.h>
-#include <optee_msg_supplicant.h>
 #include <signed_hdr.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -154,10 +154,11 @@ static TEE_Result get_elf_segments(struct user_ta_elf *elf,
 				return TEE_ERROR_OUT_OF_MEMORY;
 			}
 			segs = p;
-			segs[num_segs].offs = ROUNDDOWN(va, SMALL_PAGE_SIZE);
-			segs[num_segs].oend = ROUNDUP(va + size,
-						      SMALL_PAGE_SIZE);
-			segs[num_segs].flags = flags;
+			segs[num_segs] = (struct load_seg) {
+				.offs = ROUNDDOWN(va, SMALL_PAGE_SIZE),
+				.oend = ROUNDUP(va + size, SMALL_PAGE_SIZE),
+				.flags = flags,
+			};
 			num_segs++;
 		} else if (type == PT_ARM_EXIDX) {
 			elf->exidx_start = va;
@@ -178,8 +179,8 @@ static TEE_Result get_elf_segments(struct user_ta_elf *elf,
 			segs[idx - 1].flags |= segs[idx].flags;
 
 			/* Remove this index */
-			memcpy(segs + idx, segs + idx + 1,
-			       (num_segs - idx - 1) * sizeof(*segs));
+			memmove(segs + idx, segs + idx + 1,
+				(num_segs - idx - 1) * sizeof(*segs));
 			num_segs--;
 		} else {
 			idx++;
@@ -198,8 +199,12 @@ static struct mobj *alloc_ta_mem(size_t size)
 #else
 	struct mobj *mobj = mobj_mm_alloc(mobj_sec_ddr, size, &tee_mm_sec_ddr);
 
-	if (mobj)
-		memset(mobj_get_va(mobj, 0), 0, size);
+	if (mobj) {
+		size_t granularity = BIT(tee_mm_sec_ddr.shift);
+
+		/* Round up to allocation granularity size */
+		memset(mobj_get_va(mobj, 0), 0, ROUNDUP(size, granularity));
+	}
 	return mobj;
 #endif
 }
@@ -308,7 +313,7 @@ static TEE_Result user_ta_enter(TEE_ErrorOrigin *err,
 	serr = TEE_ORIGIN_TRUSTED_APP;
 
 	if (utc->ctx.panicked) {
-		DMSG("tee_user_ta_enter: TA panicked with code 0x%x\n",
+		DMSG("tee_user_ta_enter: TA panicked with code 0x%x",
 		     utc->ctx.panic_code);
 		serr = TEE_ORIGIN_TEE;
 		res = TEE_ERROR_TARGET_DEAD;
@@ -396,8 +401,8 @@ static void show_elfs(struct user_ta_ctx *utc)
 	size_t __maybe_unused idx = 0;
 
 	TAILQ_FOREACH(elf, &utc->elfs, link)
-		EMSG_RAW(" [%zu] %pUl @ %#" PRIxVA, idx++,
-			 (void *)&elf->uuid, elf->load_addr);
+		EMSG_RAW(" [%zu] %pUl @ 0x%0*" PRIxVA, idx++,
+			 (void *)&elf->uuid, PRIxVA_WIDTH, elf->load_addr);
 }
 
 static void user_ta_dump_state(struct tee_ta_ctx *ctx)
@@ -408,11 +413,11 @@ static void user_ta_dump_state(struct tee_ta_ctx *ctx)
 	char desc[13];
 	size_t n = 0;
 
-	EMSG_RAW(" arch: %s  load address: %#" PRIxVA " ctx-idr: %d",
-		 utc->is_32bit ? "arm" : "aarch64", utc->load_addr,
-		 utc->vm_info->asid);
-	EMSG_RAW(" stack: 0x%" PRIxVA " %zu",
-		 utc->stack_addr, utc->mobj_stack->size);
+	EMSG_RAW(" arch: %s  load address: 0x%0*" PRIxVA " ctx-idr: %d",
+		 utc->is_32bit ? "arm" : "aarch64", PRIxVA_WIDTH,
+		 utc->load_addr, utc->vm_info->asid);
+	EMSG_RAW(" stack: 0x%0*" PRIxVA " %zu",
+		 PRIxVA_WIDTH, utc->stack_addr, utc->mobj_stack->size);
 	TAILQ_FOREACH(r, &utc->vm_info->regions, link) {
 		paddr_t pa = 0;
 
@@ -421,9 +426,10 @@ static void user_ta_dump_state(struct tee_ta_ctx *ctx)
 
 		mattr_perm_to_str(flags, sizeof(flags), r->attr);
 		describe_region(utc, r->va, r->size, desc, sizeof(desc));
-		EMSG_RAW(" region %zu: va %#" PRIxVA " pa %#" PRIxPA
-			 " size %#zx flags %s %s",
-			 n, r->va, pa, r->size, flags, desc);
+		EMSG_RAW(" region %2zu: va 0x%0*" PRIxVA " pa 0x%0*" PRIxPA
+			 " size 0x%06zx flags %s %s",
+			 n, PRIxVA_WIDTH, r->va, PRIxPA_WIDTH, pa, r->size,
+			 flags, desc);
 		n++;
 	}
 	show_elfs(utc);
@@ -498,9 +504,6 @@ static const struct tee_ta_ops user_ta_ops __rodata_unpaged = {
 	.get_instance_id = user_ta_get_instance_id,
 };
 
-static SLIST_HEAD(uta_stores_head, user_ta_store_ops) uta_store_list =
-		SLIST_HEAD_INITIALIZER(uta_stores_head);
-
 /*
  * Break unpaged attribute dependency propagation to user_ta_ops structure
  * content thanks to a runtime initialization of the ops reference.
@@ -525,31 +528,16 @@ bool is_user_ta_ctx(struct tee_ta_ctx *ctx)
 	return ctx->ops == _user_ta_ops;
 }
 
-TEE_Result tee_ta_register_ta_store(struct user_ta_store_ops *ops)
+static TEE_Result check_ta_store(void)
 {
-	struct user_ta_store_ops *p = NULL;
-	struct user_ta_store_ops *e;
+	const struct user_ta_store_ops *op = NULL;
 
-	DMSG("Registering TA store: '%s' (priority %d)", ops->description,
-	     ops->priority);
-
-	SLIST_FOREACH(e, &uta_store_list, link) {
-		/*
-		 * Do not allow equal priorities to avoid any dependency on
-		 * registration order.
-		 */
-		assert(e->priority != ops->priority);
-		if (e->priority > ops->priority)
-			break;
-		p = e;
-	}
-	if (p)
-		SLIST_INSERT_AFTER(p, ops, link);
-	else
-		SLIST_INSERT_HEAD(&uta_store_list, ops, link);
+	SCATTERED_ARRAY_FOREACH(op, ta_stores, struct user_ta_store_ops)
+		DMSG("TA store: \"%s\"", op->description);
 
 	return TEE_SUCCESS;
 }
+service_init(check_ta_store);
 
 #ifdef CFG_TA_DYNLINK
 
@@ -706,6 +694,50 @@ static TEE_Result add_deps(struct user_ta_ctx *utc __unused,
 
 #endif
 
+#ifdef CFG_TA_ASLR
+static size_t aslr_offset(size_t min, size_t max)
+{
+	uint32_t rnd32 = 0;
+	size_t rnd = 0;
+
+	assert(min <= max);
+	if (max > min) {
+		if (crypto_rng_read(&rnd32, sizeof(rnd32))) {
+			DMSG("Random read failed");
+			return min;
+		}
+		rnd = rnd32 % (max - min);
+	}
+	return (min + rnd) * CORE_MMU_USER_CODE_SIZE;
+}
+
+static vaddr_t get_stack_va_hint(struct user_ta_ctx *utc)
+{
+	struct vm_region *r = NULL;
+	vaddr_t base = 0;
+
+	r = TAILQ_LAST(&utc->vm_info->regions, vm_region_head);
+	if (r) {
+		/*
+		 * Adding an empty page to separate TA mappings from already
+		 * present mappings with TEE_MATTR_PERMANENT to satisfy
+		 * select_va_in_range()
+		 */
+		base = r->va + r->size + CORE_MMU_USER_CODE_SIZE;
+	} else {
+		core_mmu_get_user_va_range(&base, NULL);
+	}
+
+	return base + aslr_offset(CFG_TA_ASLR_MIN_OFFSET_PAGES,
+				  CFG_TA_ASLR_MAX_OFFSET_PAGES);
+}
+#else
+static vaddr_t get_stack_va_hint(struct user_ta_ctx *utc __unused)
+{
+	return 0;
+}
+#endif
+
 static TEE_Result load_elf_from_store(const TEE_UUID *uuid,
 				      const struct user_ta_store_ops *ta_store,
 				      struct user_ta_ctx *utc)
@@ -760,6 +792,11 @@ static TEE_Result load_elf_from_store(const TEE_UUID *uuid,
 		/* Ensure proper alignment of stack */
 		size_t stack_sz = ROUNDUP(ta_head->stack_size,
 					  STACK_ALIGNMENT);
+
+		if (!stack_sz) {
+			res = TEE_ERROR_OUT_OF_MEMORY;
+			goto out;
+		}
 		utc->mobj_stack = alloc_ta_mem(stack_sz);
 		if (!utc->mobj_stack) {
 			res = TEE_ERROR_OUT_OF_MEMORY;
@@ -771,13 +808,11 @@ static TEE_Result load_elf_from_store(const TEE_UUID *uuid,
 	 * Map physical memory into TA virtual memory
 	 */
 	if (elf == exe) {
-
 		res = vm_info_init(utc);
 		if (res != TEE_SUCCESS)
 			goto out;
 
-		/* Add stack segment */
-		utc->stack_addr = 0;
+		utc->stack_addr = get_stack_va_hint(utc);
 		res = vm_map(utc, &utc->stack_addr, utc->mobj_stack->size,
 			     TEE_MATTR_URW | TEE_MATTR_PRW, utc->mobj_stack,
 			     0);
@@ -789,11 +824,11 @@ static TEE_Result load_elf_from_store(const TEE_UUID *uuid,
 	if (res != TEE_SUCCESS)
 		goto out;
 
-	if (prev) {
+	if (prev)
 		elf->load_addr = prev->load_addr + prev->mobj_code->size;
-		elf->load_addr = ROUNDUP(elf->load_addr,
-					 CORE_MMU_USER_CODE_SIZE);
-	}
+	else
+		elf->load_addr = utc->stack_addr + utc->mobj_stack->size;
+	elf->load_addr = ROUNDUP(elf->load_addr, CORE_MMU_USER_CODE_SIZE);
 
 	for (n = 0; n < num_segs; n++) {
 		uint32_t prot = elf_flags_to_mattr(segs[n].flags) |
@@ -834,21 +869,21 @@ out:
 /* Loads a single ELF file (main executable or library) */
 static TEE_Result load_elf(const TEE_UUID *uuid, struct user_ta_ctx *utc)
 {
-	const struct user_ta_store_ops *store;
-	TEE_Result res;
+	TEE_Result res = TEE_ERROR_ITEM_NOT_FOUND;
+	const struct user_ta_store_ops *op = NULL;
 
-	SLIST_FOREACH(store, &uta_store_list, link) {
+	SCATTERED_ARRAY_FOREACH(op, ta_stores, struct user_ta_store_ops) {
 		DMSG("Lookup user TA ELF %pUl (%s)", (void *)uuid,
-		     store->description);
-		res = load_elf_from_store(uuid, store, utc);
-		if (res == TEE_ERROR_ITEM_NOT_FOUND)
+		     op->description);
+
+		res = load_elf_from_store(uuid, op, utc);
+		DMSG("res=0x%x", res);
+		if (res == TEE_ERROR_ITEM_NOT_FOUND ||
+		    res == TEE_ERROR_STORAGE_NOT_AVAILABLE)
 			continue;
-		if (res) {
-			DMSG("res=0x%x", res);
-			continue;
-		}
 		return res;
 	}
+
 	return TEE_ERROR_ITEM_NOT_FOUND;
 }
 
