@@ -275,6 +275,27 @@ static void ree_fs_ta_close(struct user_ta_store_handle *h)
 	free(handle);
 }
 
+#ifdef CFG_ATTESTATION_MEASURE
+static TEE_Result ree_fs_ta_get_hash(
+	struct user_ta_store_handle *h,
+	uint8_t *hash,
+	size_t hash_len
+	)
+{
+	struct ree_fs_ta_handle *handle = (struct ree_fs_ta_handle *)h;
+
+	if (!hash || hash_len != handle->shdr->hash_size)
+		return TEE_ERROR_BAD_PARAMETERS;
+
+	if (handle->hash_algo != TEE_ALG_SHA256)
+		return TEE_ERROR_SECURITY;
+
+	memcpy(hash, SHDR_GET_HASH(handle->shdr), hash_len);
+
+	return TEE_SUCCESS;
+}
+#endif
+
 #ifndef CFG_REE_FS_TA_BUFFERED
 TEE_TA_REGISTER_TA_STORE(9) = {
 	.description = "REE",
@@ -283,6 +304,9 @@ TEE_TA_REGISTER_TA_STORE(9) = {
 	.get_tag = ree_fs_ta_get_tag,
 	.read = ree_fs_ta_read,
 	.close = ree_fs_ta_close,
+#ifdef CFG_ATTESTATION_MEASURE
+	.get_hash = ree_fs_ta_get_hash,
+#endif
 };
 #endif
 
@@ -303,6 +327,9 @@ struct buf_ree_fs_ta_handle {
 	size_t offs;
 	uint8_t *tag;
 	unsigned int tag_len;
+#ifdef CFG_ATTESTATION_MEASURE
+	uint8_t hash[TEE_SHA256_HASH_SIZE];
+#endif
 };
 
 static TEE_Result buf_ta_open(const TEE_UUID *uuid,
@@ -334,6 +361,12 @@ static TEE_Result buf_ta_open(const TEE_UUID *uuid,
 	res = ree_fs_ta_get_tag(handle->h, handle->tag, &handle->tag_len);
 	if (res)
 		goto err;
+
+#ifdef CFG_ATTESTATION_MEASURE
+	res = ree_fs_ta_get_hash(handle->h, handle->hash, TEE_SHA256_HASH_SIZE);
+	if (res)
+		goto err;
+#endif
 
 	handle->mm = tee_mm_alloc(&tee_mm_sec_ddr, handle->ta_size);
 	if (!handle->mm) {
@@ -409,6 +442,24 @@ static void buf_ta_close(struct user_ta_store_handle *h)
 	free(handle);
 }
 
+#ifdef CFG_ATTESTATION_MEASURE
+static TEE_Result buf_ta_get_hash(
+	struct user_ta_store_handle *h,
+	uint8_t *hash,
+	size_t hash_len
+	)
+{
+	struct buf_ree_fs_ta_handle *handle = (struct buf_ree_fs_ta_handle *)h;
+
+	if (!hash || hash_len != sizeof(handle->hash))
+		return TEE_ERROR_BAD_PARAMETERS;
+
+	memcpy(hash, handle->hash, hash_len);
+
+	return TEE_SUCCESS;
+}
+#endif
+
 TEE_TA_REGISTER_TA_STORE(9) = {
 	.description = "REE [buffered]",
 	.open = buf_ta_open,
@@ -416,6 +467,9 @@ TEE_TA_REGISTER_TA_STORE(9) = {
 	.get_tag = buf_ta_get_tag,
 	.read = buf_ta_read,
 	.close = buf_ta_close,
+#ifdef CFG_ATTESTATION_MEASURE
+	.get_hash = buf_ta_get_hash,
+#endif
 };
 
 #endif /* CFG_REE_FS_TA_BUFFERED */
