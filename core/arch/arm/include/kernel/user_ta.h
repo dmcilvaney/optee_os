@@ -41,14 +41,7 @@ SLIST_HEAD(load_seg_head, load_seg);
  * @ta_time_offs:	Time reference used by the TA
  * @areas:		Memory areas registered by pager
  * @vfp:		State of VFP registers
- * @dynamic_measurement	A running hash of all binary components loaded,
- *			including runtime dynamic libraries
- * @static_measurement	A measurement of the TA as it existed when execution
- *			started (first session start)
- * @is_measured		True if the static measurement has been set
- * @ta_version		The TA version as defined in the shdr_bootstrap_ta
- *			bootstrap header
- * @signer_measurement	Hash of the signing key used to verify the TA
+ * @attestation_data:	Measurements of this TA used for attestation
  * @ctx:		Generic TA context
  */
 struct user_ta_ctx {
@@ -74,11 +67,7 @@ struct user_ta_ctx {
 	struct thread_user_vfp_state vfp;
 #endif
 #ifdef CFG_ATTESTATION_MEASURE
-	uint8_t dynamic_measurement[ATTESTATION_MEASUREMENT_SIZE];
-	uint8_t static_measurement[ATTESTATION_MEASUREMENT_SIZE];
-	bool is_measured;
-	uint32_t ta_version;
-	uint8_t signer_measurement[ATTESTATION_MEASUREMENT_SIZE];
+	struct tee_attestation_data attestation_data;
 #endif
 	struct tee_ta_ctx ctx;
 

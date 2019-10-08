@@ -42,8 +42,10 @@ struct tadb_entry {
 	uint8_t iv[TADB_IV_SIZE];
 	uint8_t tag[TADB_TAG_SIZE];
 	uint8_t key[TADB_KEY_SIZE];
+#ifdef CFG_ATTESTATION_MEASURE
 	uint8_t measurement[ATTESTATION_MEASUREMENT_SIZE];
 	uint32_t measurement_algo;
+#endif
 };
 
 struct tadb_header {

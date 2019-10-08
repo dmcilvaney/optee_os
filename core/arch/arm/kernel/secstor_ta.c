@@ -9,7 +9,6 @@
 #include <initcall.h>
 #include <crypto/crypto.h>
 #include <ta_pub_key.h>
-#include <tee/attestation.h>
 
 static TEE_Result secstor_ta_open(const TEE_UUID *uuid,
 				  struct user_ta_store_handle **handle)

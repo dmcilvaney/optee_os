@@ -147,7 +147,7 @@ static TEE_Result user_ta_enter(TEE_ErrorOrigin *err,
 	init_utee_param(usr_params, param, param_va);
 
 #ifdef CFG_ATTESTATION_MEASURE
-	assert(utc->is_measured);
+	assert(utc->attestation_data.is_measured);
 #endif
 
 	res = thread_enter_user_mode(func, tee_svc_kaddr_to_uref(session),
@@ -287,17 +287,17 @@ static TEE_Result user_ta_enter_open_session(struct tee_ta_session *s,
 		 * and related will update the dynamic measurement but not
 		 * this static version.
 		 */
-		assert(!utc->is_measured);
+		assert(!utc->attestation_data.is_measured);
 
-		utc->is_measured = true;
-		memcpy(utc->static_measurement,
-		       utc->dynamic_measurement,
-		       sizeof(utc->dynamic_measurement));
+		utc->attestation_data.is_measured = true;
+		memcpy(utc->attestation_data.static_measurement,
+		       utc->attestation_data.dynamic_measurement,
+		       sizeof(utc->attestation_data.dynamic_measurement));
 
 		DMSG("Static measurement of user TA %pUl done:",
 		     (void *)&utc->ctx.uuid);
-		DHEXDUMP(utc->static_measurement,
-			 sizeof(utc->static_measurement));
+		DHEXDUMP(utc->attestation_data.static_measurement,
+			 sizeof(utc->attestation_data.static_measurement));
 #endif /* CFG_ATTESTATION_MEASURE */
 	}
 

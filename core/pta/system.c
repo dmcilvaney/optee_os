@@ -20,7 +20,6 @@
 #include <string.h>
 #include <tee_api_defines_extensions.h>
 #include <tee_api_defines.h>
-#include <tee/attestation.h>
 #include <util.h>
 
 #define MAX_ENTROPY_IN			32u
@@ -232,9 +231,10 @@ static TEE_Result update_measurements(const struct user_ta_store_ops *ta_store,
 	size_t buffer_len = 0;
 	void *hash_ctx = NULL;
 	uint8_t hash[ATTESTATION_MEASUREMENT_SIZE] = {0};
+	struct tee_attestation_data *attestation = &utc->attestation_data;
 
-	DMSG("Measuring binary %pUl ", (void *)&utc->ctx.uuid);
-	if (utc->is_measured)
+	DMSG("Measuring ta %pUl ", (void *)&utc->ctx.uuid);
+	if (attestation->is_measured)
 		EMSG("Warning: Measuring dynamic libraries with attestation!");
 
 	/*
@@ -242,36 +242,36 @@ static TEE_Result update_measurements(const struct user_ta_store_ops *ta_store,
 	 * hash is zero, set the TA hash to the hash of this ELF. Initialize
 	 * constant measurement fields now.
 	 */
-	if (!memcmp(utc->dynamic_measurement, hash, sizeof(hash))) {
-		buffer_len = sizeof(utc->signer_measurement);
+	if (!memcmp(attestation->dynamic_measurement, hash, sizeof(hash))) {
+		buffer_len = sizeof(attestation->signer_measurement);
 		res = ta_store->get_signer(handle,
-					   utc->signer_measurement,
+					   attestation->signer_measurement,
 					   &buffer_len);
 		if (res)
 			return res;
 
-		res = ta_store->get_version(handle, &utc->ta_version);
+		res = ta_store->get_version(handle, &attestation->ta_version);
 		if (res)
 			return res;
 
-		buffer_len = sizeof(utc->dynamic_measurement);
+		buffer_len = sizeof(attestation->dynamic_measurement);
 		res = ta_store->get_measurement(handle,
-						 utc->dynamic_measurement,
+						 attestation->dynamic_measurement,
 						 &buffer_len);
 		DMSG("Initial measurement:");
-		DHEXDUMP(utc->dynamic_measurement,
-			 sizeof(utc->dynamic_measurement));
+		DHEXDUMP(attestation->dynamic_measurement,
+			 sizeof(attestation->dynamic_measurement));
 		DMSG("Signer:");
-		DHEXDUMP(utc->signer_measurement,
-			 sizeof(utc->signer_measurement));
+		DHEXDUMP(attestation->signer_measurement,
+			 sizeof(attestation->signer_measurement));
 		DMSG("Version:");
-		DHEXDUMP(&utc->ta_version, sizeof(utc->ta_version));
+		DHEXDUMP(&attestation->ta_version, sizeof(attestation->ta_version));
 		return res;
 	}
 
 	EMSG("Extending measurement");
 	DMSG("Initial measurement:");
-	DHEXDUMP(utc->dynamic_measurement, sizeof(utc->dynamic_measurement));
+	DHEXDUMP(attestation->dynamic_measurement, sizeof(attestation->dynamic_measurement));
 
 	/* get hash for the elf that was just loaded */
 	buffer_len = sizeof(hash);
@@ -289,8 +289,8 @@ static TEE_Result update_measurements(const struct user_ta_store_ops *ta_store,
 
 	/* hash the existing value */
 	res = crypto_hash_update(hash_ctx, ATTESTATION_MEASUREMENT_ALGO,
-				 utc->dynamic_measurement,
-				 sizeof(utc->dynamic_measurement));
+				 attestation->dynamic_measurement,
+				 sizeof(attestation->dynamic_measurement));
 	if (res)
 		goto end;
 
@@ -302,8 +302,8 @@ static TEE_Result update_measurements(const struct user_ta_store_ops *ta_store,
 
 	/* and write back to the TA hash */
 	res = crypto_hash_final(hash_ctx, ATTESTATION_MEASUREMENT_ALGO,
-				utc->dynamic_measurement,
-				sizeof(utc->dynamic_measurement));
+				attestation->dynamic_measurement,
+				sizeof(attestation->dynamic_measurement));
 	if (res)
 		goto end;
 
@@ -312,11 +312,14 @@ end:
 		crypto_hash_free_ctx(hash_ctx, ATTESTATION_MEASUREMENT_ALGO);
 
 	DMSG("Updated measurement:");
-	DHEXDUMP(utc->dynamic_measurement, sizeof(utc->dynamic_measurement));
+	DHEXDUMP(attestation->dynamic_measurement,
+		 sizeof(attestation->dynamic_measurement));
 	DMSG("Signer:");
-	DHEXDUMP(utc->signer_measurement, sizeof(utc->signer_measurement));
+	DHEXDUMP(attestation->signer_measurement,
+		 sizeof(attestation->signer_measurement));
 	DMSG("Version:");
-	DHEXDUMP(&utc->ta_version, sizeof(utc->ta_version));
+	DHEXDUMP(&attestation->ta_version,
+		 sizeof(attestation->ta_version));
 	return res;
 }
 #endif /* CFG_ATTESTATION_MEASURE */
