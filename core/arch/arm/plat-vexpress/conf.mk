@@ -91,6 +91,8 @@ CFG_DTB_MAX_SIZE ?= 0x100000
 CFG_TA_ASLR ?= y
 endif
 
+CFG_CORE_HEAP_SIZE ?= 98304
+
 ifeq ($(PLATFORM_FLAVOR),qemu_armv8a)
 CFG_TEE_CORE_NB_CORE = 4
 # [0e00.0000 0e0f.ffff] is reserved to early boot
