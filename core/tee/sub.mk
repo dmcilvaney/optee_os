@@ -41,7 +41,7 @@ srcs-y += tee_pobj.c
 srcs-y += tee_time_generic.c
 srcs-$(CFG_SECSTOR_TA) += tadb.c
 srcs-$(CFG_GP_SOCKETS) += socket.c
-srcs-$(CFG_ATTESTATION_MEASURE) += attestation.c
+srcs-$(CFG_ATTESTATION_MEASURE) += attestation_temp.c
 srcs-$(CFG_ATTESTATION_MEASURE) += attestation_db.c
 
 endif #CFG_WITH_USER_TA,y

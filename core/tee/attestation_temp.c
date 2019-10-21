@@ -10,9 +10,10 @@
 #include <kernel/mutex.h>
 #include <kernel/user_ta.h>
 #include <libfdt.h>
+#include <printk.h>
 #include <stdio.h>
 #include <string.h>
-#include "string_ext.h"
+#include <string_ext.h>
 #include <tee_api_types.h>
 #include <tee/attestation.h>
 #include <tee/attestation_db.h>
@@ -53,7 +54,9 @@ __weak TEE_Result attestation_create_alias(struct attestation_alias_data *ctx)
 	struct tee_attestation_data *ta_measurements = NULL;
 	char ta_uuid_name[64];
 
-	char test_data[] = "YOUR PEM HERE";
+	char test_data[] = "-----BEGIN CERTIFICATE-----\n"
+			   "YOUR PEM HERE\n"
+			   "-----END CERTIFICATE-----";
 
 	if(ctx->has_alias)
 		return TEE_SUCCESS;
@@ -74,10 +77,10 @@ __weak TEE_Result attestation_create_alias(struct attestation_alias_data *ctx)
 	if (!ta_session)
 		return TEE_ERROR_BAD_STATE;
 
-	snprintf(ta_uuid_name, sizeof(ta_uuid_name), "%pUl",
+	snprintk(ta_uuid_name, sizeof(ta_uuid_name), "%pUl",
 		 (void *)&ta_session->ctx->uuid);
 	utc = to_user_ta_ctx(ta_session->ctx);
-	DMSG("Attesting to ta %pUl", (void *)&ta_session->ctx->uuid);
+	DMSG("Attesting to ta %s", ta_uuid_name);
 
 	/*
 	 * Derive a fwid for this TA based on OP-TEE's alias and the
@@ -110,6 +113,8 @@ __weak TEE_Result attestation_create_alias(struct attestation_alias_data *ctx)
 		ctx->has_alias = true;
 
 	free(cert);
+
+	attest_db_dump(&cert_blob);
 
 	return res;
 }
@@ -157,7 +162,9 @@ static TEE_Result add_optee_root(void)
 	struct attestation_cert_data *root_cert = NULL;
 	char name[] = "optee";
 	struct attestation_state *optee_state = NULL;
-	char temp_pem[] = "OPTEE PEM HERE!"; //TODO
+	char temp_pem[] = "-----BEGIN CERTIFICATE-----\n"
+			  "OPTEE PEM\n"
+			  "-----END CERTIFICATE-----"; //TODO
 
 	optee_data.plat_data = calloc(1, sizeof(struct attestation_state));
 	if (!optee_data.plat_data)
@@ -242,7 +249,9 @@ static void test_cert_chain(void)
 	struct attestation_cert_data *cert = NULL;
 	uint8_t *optee_fwid = NULL;
 	size_t optee_fwid_size = 0;
-	char test_data[] = "PEM HERE";
+	char test_data[] = "-----BEGIN CERTIFICATE-----\n"
+			   "TEST PEM\n"
+			   "-----END CERTIFICATE-----";
 	char baz_fwid[] = "BAZ FWID";
 	char bang_fwid[] = "BANG FWID";
 	char wizz_fwid[] = "WIZZ FWID";
@@ -266,7 +275,7 @@ static void test_cert_chain(void)
 	strlcpy(cert->pem, test_data, sizeof(test_data));
 	memcpy(cert->subject_fwid, bang_fwid, sizeof(bang_fwid));
 	memcpy(cert->issuer_fwid, optee_fwid, optee_fwid_size);
-	attest_db_add_cert(&cert_blob, cert);
+	res = attest_db_add_cert(&cert_blob, cert);
 	if (res != TEE_SUCCESS)
 		panic("cert test fail");
 
@@ -276,17 +285,17 @@ static void test_cert_chain(void)
 	strlcpy(cert->pem, test_data, sizeof(test_data));
 	memcpy(cert->subject_fwid, wizz_fwid, sizeof(wizz_fwid));
 	memcpy(cert->issuer_fwid, baz_fwid, sizeof(baz_fwid));
-	attest_db_add_cert(&cert_blob, cert);
+	res = attest_db_add_cert(&cert_blob, cert);
 	if (res != TEE_SUCCESS)
 		panic("cert test fail");
 
 	/* Try to re-add, make sure we only get one */
-	attest_db_add_cert(&cert_blob, cert);
+	res = attest_db_add_cert(&cert_blob, cert);
 	if (res != TEE_SUCCESS)
 		panic("cert test fail");
 
 	cert->pem[0] += 1;
-	attest_db_add_cert(&cert_blob, cert);
+	res = attest_db_add_cert(&cert_blob, cert);
 	if (res != TEE_ERROR_SECURITY)
 		panic("cert test fail");
 

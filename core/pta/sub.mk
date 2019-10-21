@@ -9,4 +9,4 @@ srcs-$(CFG_SECSTOR_TA_MGMT_PTA) += secstor_ta_mgmt.c
 endif
 srcs-$(CFG_WITH_STATS) += stats.c
 srcs-$(CFG_SYSTEM_PTA) += system.c
-srcs-y += trust.c
+srcs-$(CFG_ATTESTATION_MEASURE) += trust_temp.c

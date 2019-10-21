@@ -1,6 +1,6 @@
 #include <tee/attestation.h>
 #include <kernel/pseudo_ta.h>
-#include <pta_trust.h>
+#include <pta_trust_temp.h>
 #include <kernel/user_ta.h>
 
 /*
