@@ -20,7 +20,7 @@
 #include <util.h>
 
 
-static struct attestation_cert_blob *cert_blob;
+static struct attest_db *cert_blob;
 static struct attestation_alias_data optee_data;
 
 struct attestation_state {
@@ -36,21 +36,22 @@ __weak TEE_Result attestation_get_certs(struct attestation_alias_data *ctx,
 		return TEE_ERROR_BAD_PARAMETERS;
 
 	fwid = ((struct attestation_state *)ctx->plat_data)->fwid;
-	return get_certs_fdt(&cert_blob, fwid, ATTESTATION_MEASUREMENT_SIZE,
-			     buf, buf_len);
+	return attest_db_get_chain(&cert_blob, fwid,
+				   ATTESTATION_MEASUREMENT_SIZE, buf, buf_len);
 }
 
 
 
 __weak TEE_Result attestation_create_alias(struct attestation_alias_data *ctx)
 {
-	struct attestation_cert_data *cert = NULL;
-	uint8_t *optee_fwid = NULL;
-	uint8_t *subject_fwid = NULL;
 	TEE_Result res;
-	char ta_uuid_name[64];
-	struct tee_ta_session *ta_session = NULL;
 	struct user_ta_ctx *utc;
+	struct tee_ta_session *ta_session = NULL;
+	struct attestation_cert_data *cert = NULL;
+	struct attestation_state *optee_state = NULL;
+	struct attestation_state *subject_state = NULL;
+	struct tee_attestation_data *ta_measurements = NULL;
+	char ta_uuid_name[64];
 
 	char test_data[] = "YOUR PEM HERE";
 
@@ -76,27 +77,40 @@ __weak TEE_Result attestation_create_alias(struct attestation_alias_data *ctx)
 	snprintf(ta_uuid_name, sizeof(ta_uuid_name), "%pUl",
 		 (void *)&ta_session->ctx->uuid);
 	utc = to_user_ta_ctx(ta_session->ctx);
+	DMSG("Attesting to ta %pUl", (void *)&ta_session->ctx->uuid);
 
-	subject_fwid = ((struct attestation_state *)ctx->plat_data)->fwid;
-	memcpy(subject_fwid, utc->attestation_data.static_measurement,
-	       sizeof(utc->attestation_data.static_measurement));
+	/*
+	 * Derive a fwid for this TA based on OP-TEE's alias and the
+	 * measurement of the TA.
+	 */
+	subject_state = (struct attestation_state *)ctx->plat_data;
+	optee_state = (struct attestation_state *)optee_data.plat_data;
+	ta_measurements = &utc->attestation_data;
 
-	DMSG("Attesting to ta %s (%pUl)", ta_uuid_name, (void *)&ta_session->ctx->uuid);
+	//TODO: Calculate actual fwid, alias
+	DMSG("Measurement which would be used:");
+	DHEXDUMP(ta_measurements->static_measurement,
+		 sizeof(ta_measurements->static_measurement));
+	memcpy(ctx->alias_identity, utc->attestation_data.static_measurement,
+	       sizeof(subject_state->fwid));
+	memcpy(subject_state->fwid, ctx->alias_identity,
+	       sizeof(subject_state->fwid));
 
 	cert = calloc(1, sizeof(*cert));
 	strlcpy(cert->issuer, "optee", sizeof(cert->issuer));
-	optee_fwid = ((struct attestation_state *)optee_data.plat_data)->fwid;
-
 	strlcpy(cert->subject, ta_uuid_name, sizeof(cert->subject));
 	memcpy(cert->pem, test_data, sizeof(test_data));
-	memcpy(cert->subject_fwid, subject_fwid, sizeof(cert->subject_fwid));
-	memcpy(cert->issuer_fwid, optee_fwid, ATTESTATION_MEASUREMENT_SIZE);
+	memcpy(cert->subject_fwid, subject_state->fwid,
+	       sizeof(cert->subject_fwid));
+	memcpy(cert->issuer_fwid, optee_state->fwid,
+	       sizeof(cert->issuer_fwid));
 
-	res = add_cert_fdt(&cert_blob, cert);
+	res = attest_db_add_cert(&cert_blob, cert);
 	if(!res)
 		ctx->has_alias = true;
 
 	free(cert);
+
 	return res;
 }
 
@@ -138,11 +152,12 @@ __weak TEE_Result attestation_start(struct attestation_alias_data *ctx)
 
 static TEE_Result add_optee_root(void)
 {
+	TEE_Result res;
+
 	struct attestation_cert_data *root_cert = NULL;
 	char name[] = "optee";
 	struct attestation_state *optee_state = NULL;
 	char temp_pem[] = "OPTEE PEM HERE!"; //TODO
-	TEE_Result res;
 
 	optee_data.plat_data = calloc(1, sizeof(struct attestation_state));
 	if (!optee_data.plat_data)
@@ -161,11 +176,11 @@ static TEE_Result add_optee_root(void)
 	if (res)
 		return res;
 	
-	//TODO: Don't use the alias directly as the fwid!
 	root_cert = calloc(1, sizeof(*root_cert));
 	if (!root_cert)
 		return TEE_ERROR_OUT_OF_MEMORY;
 	optee_state = (struct attestation_state *)optee_data.plat_data;
+	//TODO: Compute actual useful fwid.
 	memcpy(optee_state->fwid, optee_data.alias_identity,
 	       sizeof(optee_state->fwid));
 	memcpy(root_cert->subject_fwid, optee_data.alias_identity,
@@ -188,7 +203,7 @@ static TEE_Result add_optee_root(void)
 	 * Add the self-signed root of trust to the certificate store. This
 	 * certificate should be unique to the device it was created on
 	 */
-	res =  add_cert_fdt(&cert_blob, root_cert);
+	res =  attest_db_add_cert(&cert_blob, root_cert);
 
 	free(root_cert);
 	return res;
@@ -204,7 +219,7 @@ __weak TEE_Result initialize_cert_chain(void)
 	 * we could store here instead.
 	 */
 	cert_blob = NULL;
-	res = initialize_empty_fdt(&cert_blob);
+	res = attest_db_initialize(&cert_blob);
 	if (res)
 		return res;
 
@@ -222,6 +237,8 @@ error:
 
 static void test_cert_chain(void)
 {
+	TEE_Result res = TEE_ERROR_GENERIC;
+
 	struct attestation_cert_data *cert = NULL;
 	uint8_t *optee_fwid = NULL;
 	size_t optee_fwid_size = 0;
@@ -239,7 +256,9 @@ static void test_cert_chain(void)
 	strlcpy(cert->pem, test_data, sizeof(test_data));
 	memcpy(cert->subject_fwid, baz_fwid, sizeof(baz_fwid));
 	memcpy(cert->issuer_fwid, optee_fwid, optee_fwid_size);
-	add_cert_fdt(&cert_blob, cert);
+	res = attest_db_add_cert(&cert_blob, cert);
+	if (res != TEE_SUCCESS)
+		panic("cert test fail");
 
 	memset(cert, 0, sizeof(*cert));
 	strlcpy(cert->issuer, "optee", sizeof(cert->issuer));
@@ -247,7 +266,9 @@ static void test_cert_chain(void)
 	strlcpy(cert->pem, test_data, sizeof(test_data));
 	memcpy(cert->subject_fwid, bang_fwid, sizeof(bang_fwid));
 	memcpy(cert->issuer_fwid, optee_fwid, optee_fwid_size);
-	add_cert_fdt(&cert_blob, cert);
+	attest_db_add_cert(&cert_blob, cert);
+	if (res != TEE_SUCCESS)
+		panic("cert test fail");
 
 	memset(cert, 0, sizeof(*cert));
 	strlcpy(cert->issuer, "Baz", sizeof(cert->issuer));
@@ -255,13 +276,19 @@ static void test_cert_chain(void)
 	strlcpy(cert->pem, test_data, sizeof(test_data));
 	memcpy(cert->subject_fwid, wizz_fwid, sizeof(wizz_fwid));
 	memcpy(cert->issuer_fwid, baz_fwid, sizeof(baz_fwid));
-	add_cert_fdt(&cert_blob, cert);
+	attest_db_add_cert(&cert_blob, cert);
+	if (res != TEE_SUCCESS)
+		panic("cert test fail");
 
 	/* Try to re-add, make sure we only get one */
-	add_cert_fdt(&cert_blob, cert);
+	attest_db_add_cert(&cert_blob, cert);
+	if (res != TEE_SUCCESS)
+		panic("cert test fail");
 
 	cert->pem[0] += 1;
-	add_cert_fdt(&cert_blob, cert);
+	attest_db_add_cert(&cert_blob, cert);
+	if (res != TEE_ERROR_SECURITY)
+		panic("cert test fail");
 
 	free(cert);
 }
@@ -276,7 +303,7 @@ static TEE_Result attestation_initialization(void)
 
 	test_cert_chain();
 
-	dump_fdt(&cert_blob);
+	attest_db_dump(&cert_blob);
 
 	return TEE_SUCCESS;
 }

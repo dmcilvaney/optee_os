@@ -20,12 +20,12 @@
 #define CERT_DB_ALLOC_SIZE (DER_MAX_PEM + 0x100)
 
 /*
- * Adding and removing nodes may affect the FDT, all accesses should be in
- * a critical section.
+ * Adding and removing nodes may affect the FDT, this mutex protects the
+ * fdt blob and must be held when ever accessing the structure.
  */
 static struct mutex cert_db_mutex = MUTEX_INITIALIZER;
 
-static void dump_fdt_internal(struct attestation_cert_blob **cert_blob)
+static void dump_fdt_internal(struct attest_db **attest_blob)
 {
 	size_t i = 0;
 	int len = 0;
@@ -33,18 +33,17 @@ static void dump_fdt_internal(struct attestation_cert_blob **cert_blob)
 	char *strptr = NULL;
 
 	//4 chars per byte ("\x00"), + null term.
-	len = (*cert_blob)->fdt_size * 4 + 1;
+	len = (*attest_blob)->fdt_size * 4 + 1;
 	dumpstr = calloc(1, len);
 	strptr = dumpstr;
 
-	for(i = 0; i < (*cert_blob)->fdt_size; i++) {
-		snprintf(strptr,5,"\\x%02x", ((uint8_t *)&(*cert_blob)->fdt)[i]);
+	for (i = 0; i < (*attest_blob)->fdt_size; i++) {
+		snprintf(strptr, 5,
+			 "\\x%02x", ((uint8_t *)&(*attest_blob)->fdt)[i]);
 		strptr += 4;
 	}
 
-	// DHEXDUMP(dumpstr, len);
-	// DHEXDUMP((uint8_t *)&cert_blob->fdt, cert_blob->fdt_size);
-	EMSG("DUMP FDT:");
+	IMSG("DUMP FDT:");
 	trace_ext_puts("printf \"%b\" \'");
 	trace_ext_puts(dumpstr);
 	trace_ext_puts("\' > attestation.fdt");
@@ -52,10 +51,10 @@ static void dump_fdt_internal(struct attestation_cert_blob **cert_blob)
 	free(dumpstr);
 }
 
-void dump_fdt(struct attestation_cert_blob **cert_blob)
+void attest_db_dump(struct attest_db **attest_blob)
 {
 	mutex_lock(&cert_db_mutex);
-	dump_fdt_internal(cert_blob);
+	dump_fdt_internal(attest_blob);
 	mutex_unlock(&cert_db_mutex);
 }
 
@@ -73,15 +72,16 @@ static TEE_Result fdt_error(int fdt_error)
 }
 
 /*
- * Sets issuer_node to the offset of the issuing node.
+ * Finds the offset of the issuer of the node located at cert_node.
  */
-static TEE_Result get_issuer_fdt(struct attestation_cert_blob **cert_blob,
-				 int cert_node,
-				 int *issuer_offset)
+static TEE_Result get_issuer_offs(struct attest_db **attest_blob,
+				  int cert_node,
+				  int *issuer_offset)
 {
-	const void *data = 0;
-	struct fdt_header *fdt = &(*cert_blob)->fdt;
 	int fdt_res = 0;
+
+	struct fdt_header *fdt = &(*attest_blob)->fdt;
+	const void *data = 0;
 	int issuer_phandle = 0;
 
 	*issuer_offset = 0;
@@ -103,15 +103,17 @@ static TEE_Result get_issuer_fdt(struct attestation_cert_blob **cert_blob,
 /*
  * Retrieve the certificate data for the cert stored at offset cert_node.
  */
-static TEE_Result get_cert_data_fdt(struct attestation_cert_blob **cert_blob,
-				    int cert_node,
-				    struct attestation_cert_data *cert)
+static TEE_Result get_cert_data(struct attest_db **attest_blob,
+				int cert_node,
+				struct attestation_cert_data *cert)
 {
-	struct fdt_header *fdt = &(*cert_blob)->fdt;
+	TEE_Result res = TEE_ERROR_GENERIC;
 	int fdt_res = 0;
+
+	struct fdt_header *fdt = &(*attest_blob)->fdt;
 	const char *fdt_property = NULL;
 	int issuer_offset = 0;
-	TEE_Result res = TEE_SUCCESS;
+
 
 	if (!cert)	
 		return TEE_ERROR_BAD_PARAMETERS;
@@ -119,7 +121,7 @@ static TEE_Result get_cert_data_fdt(struct attestation_cert_blob **cert_blob,
 	/*
 	 * Get the issuer
 	 */
-	res = get_issuer_fdt(cert_blob, cert_node, &issuer_offset);
+	res = get_issuer_offs(attest_blob, cert_node, &issuer_offset);
 	if (res)
 		return res;
 
@@ -136,7 +138,7 @@ static TEE_Result get_cert_data_fdt(struct attestation_cert_blob **cert_blob,
 	memcpy(cert->issuer_fwid, fdt_property,
 	       MIN((size_t)fdt_res, sizeof(cert->issuer_fwid)));
 
-	/* Now check the actual certificate, starting with subject */
+	/* Now get the actual certificate, starting with subject */
 	fdt_property = fdt_getprop(fdt, cert_node, "subject", &fdt_res);
 	if (fdt_property == NULL)
 		return fdt_error(fdt_res);
@@ -159,98 +161,42 @@ static TEE_Result get_cert_data_fdt(struct attestation_cert_blob **cert_blob,
 }
 
 /*
- * Return a buffer containing all pem encoded certificates as a null
- * terminated string.
- */
-static TEE_Result get_chain_pems_fdt(struct attestation_cert_blob **cert_blob,
-				     int cert_node, char *buf,
-				     size_t *buf_size)
-{
-	size_t actual_len = 0;
-	struct attestation_cert_data *cert = NULL;
-	size_t node_len = 0;
-	int prev_node = -1;
-	TEE_Result res = TEE_SUCCESS;
-
-
-	if (!buf_size)
-		return TEE_ERROR_BAD_PARAMETERS;
-
-	/* Start with an empty string */
-	actual_len = 1;
-	if (buf && *buf_size > 0) {
-		buf[0] = '\0';
-	}
-
-	cert = calloc(1, sizeof(*cert));
-	if (!cert)
-		return TEE_ERROR_OUT_OF_MEMORY;
-
-	do {
-		res = get_cert_data_fdt(cert_blob, cert_node, cert);
-		if(res)
-			goto err;
-
-		/* string length without NULL */
-		node_len = strlen(cert->pem);
-		/* Initialization of acutal_len already tracks the final NULL */
-		actual_len += node_len;
-		if (buf)
-			if (strlcat(buf, cert->pem, *buf_size) >= *buf_size) {
-				*buf_size = actual_len;
-				res = TEE_ERROR_SHORT_BUFFER;
-				goto err;
-			}
-		prev_node = cert_node;
-		res = get_issuer_fdt(cert_blob, cert_node, &cert_node);
-	} while (cert_node != prev_node);
-
-	*buf_size = actual_len;
-	res = TEE_SUCCESS;
-err:
-	if (cert)
-		free(cert);
-	return res;
-}
-
-/*
  * Look for a certificate which matches the attestation data. Sets
  * matching_offset to the offset of the existing node if found.
  * Returns an error if a certificate with the same fwid is found that
  * does not match perfectly.
  */
-static TEE_Result check_uniquness_fdt(struct attestation_cert_blob **cert_blob,
-				      int root_offset,
-				      struct attestation_cert_data *cert,
-				      int *matching_offset)
+static TEE_Result check_uniquness(struct attest_db **attest_blob,
+				  int root_offset,
+				  struct attestation_cert_data *cert,
+				  int *matching_offset)
 {
-	int cert_node = 0;
-	struct fdt_header *fdt = &(*cert_blob)->fdt;
+	TEE_Result res = TEE_ERROR_GENERIC;
+
+	struct fdt_header *fdt = &(*attest_blob)->fdt;
 	struct attestation_cert_data *matching_data = NULL;
-	TEE_Result res = TEE_SUCCESS;
-	
-	*matching_offset = 0;
+	int cert_offs = 0;
+
+	*matching_offset = -FDT_ERR_NOTFOUND;
 
 	/* Check if any certificate exists with a matching fwid */
-	cert_node = fdt_node_offset_by_prop_value(fdt, root_offset, "fwid",
+	cert_offs = fdt_node_offset_by_prop_value(fdt, root_offset, "fwid",
 						  cert->subject_fwid,
 						  sizeof(cert->subject_fwid));
-	if (cert_node == -FDT_ERR_NOTFOUND)
+	if (cert_offs == -FDT_ERR_NOTFOUND)
 		return TEE_SUCCESS;
-	if (cert_node < 0)
-		return fdt_error(cert_node);
+	if (cert_offs < 0)
+		return fdt_error(cert_offs);
 
-	/*
-	 * We have a possible match, check that each field matches.
-	 */
+	/* Possible match, check that each field is identical */
 	matching_data = calloc(1, sizeof(*matching_data));
 	if (!matching_data)
 		return TEE_ERROR_OUT_OF_MEMORY;
-	res = get_cert_data_fdt(cert_blob, cert_node, matching_data);
+	res = get_cert_data(attest_blob, cert_offs, matching_data);
 	if (res)
-		return res;
+		goto cleanup;
 
-	res = TEE_ERROR_BAD_STATE;
+	res = TEE_ERROR_SECURITY;
 	/* Issuer */
 	if (strcmp(matching_data->issuer, cert->issuer))
 		goto cleanup;
@@ -263,11 +209,12 @@ static TEE_Result check_uniquness_fdt(struct attestation_cert_blob **cert_blob,
 	if (memcmp(matching_data->subject_fwid, cert->subject_fwid,
 		   sizeof(matching_data->subject_fwid)))
 		goto cleanup;
+	/* Pem */
 	if (strcmp(matching_data->pem, cert->pem))
 		goto cleanup;
 
 	/* Passed all the checks */
-	*matching_offset = cert_node;
+	*matching_offset = cert_offs;
 	res = TEE_SUCCESS;
 
 cleanup:
@@ -275,39 +222,75 @@ cleanup:
 	return res;
 }
 
-TEE_Result get_certs_fdt(struct attestation_cert_blob **cert_blob,
-			 uint8_t *fwid, size_t fwid_len, char *buf,
-			 size_t *buf_size)
+/*
+ * Return a buffer containing all pem encoded certificates which make up the
+ * chain which leads to the node at cert_offs as a null terminated string.
+ */
+static TEE_Result get_chain_pems(struct attest_db **attest_blob,
+				 int cert_offs, char *buf,
+				 size_t *buf_size)
 {
-	struct fdt_header *fdt = NULL;
-	int leaf_offset = -1;
-	int root;
+	TEE_Result res = TEE_ERROR_GENERIC;
 
-	fdt = &(*cert_blob)->fdt;
-	root = fdt_subnode_offset(fdt, /* root */ 0, "certs");
-	if (root < 0)
-		return fdt_error(root);
+	struct attestation_cert_data *cert = NULL;
+	size_t actual_len = 0;
+	size_t node_len = 0;
+	int prev_offs = -1;
 
-	leaf_offset = fdt_node_offset_by_prop_value(fdt, root, "fwid",
-						    fwid, fwid_len);
-	if (leaf_offset < 0)
-		return fdt_error(leaf_offset);
 
-	return get_chain_pems_fdt(cert_blob, leaf_offset, buf, buf_size);
+	if (!buf_size)
+		return TEE_ERROR_BAD_PARAMETERS;
+
+	/* Start with an empty string */
+	actual_len = 1;
+	if (buf && *buf_size > 0)
+		buf[0] = '\0';
+
+	cert = calloc(1, sizeof(*cert));
+	if (!cert)
+		return TEE_ERROR_OUT_OF_MEMORY;
+
+	/* Walk the phandle links until a root cert (self signed) is found */
+	do {
+		res = get_cert_data(attest_blob, cert_offs, cert);
+		if (res)
+			goto err;
+
+		node_len = strlen(cert->pem);
+		actual_len += node_len;
+
+		if (buf) {
+			if (strlcat(buf, cert->pem, *buf_size) >= *buf_size) {
+				*buf_size = actual_len;
+				res = TEE_ERROR_SHORT_BUFFER;
+				goto err;
+			}
+		}
+
+		prev_offs = cert_offs;
+		res = get_issuer_offs(attest_blob, cert_offs, &cert_offs);
+	} while (cert_offs != prev_offs);
+
+	*buf_size = actual_len;
+	res = TEE_SUCCESS;
+err:
+	if (cert)
+		free(cert);
+	return res;
 }
 
 /*
  * Allocate a new buffer to hold a larger fdt. Increase CERT_DB_ALLOC_SIZE
  * bytes at a time.
  */
-static TEE_Result expand_cert_fdt(struct attestation_cert_blob **cert_blob)
+static TEE_Result expand_blob(struct attest_db **attest_blob)
 {
 	int fdt_res = 0;
-	size_t new_alloc_size = (*cert_blob)->alloc_size + CERT_DB_ALLOC_SIZE;
+	size_t new_alloc_size = (*attest_blob)->alloc_size + CERT_DB_ALLOC_SIZE;
 	size_t new_fdt_size = new_alloc_size -
-			      sizeof(struct attestation_cert_blob) +
+			      sizeof(struct attest_db) +
 			      sizeof(struct fdt_header);
-	struct attestation_cert_blob *new_blob = NULL;
+	struct attest_db *new_blob = NULL;
 	
 	new_blob = calloc(1, new_alloc_size);	
 	if (!new_blob)
@@ -316,7 +299,7 @@ static TEE_Result expand_cert_fdt(struct attestation_cert_blob **cert_blob)
 	new_blob->fdt_size = new_fdt_size;
 
 	/* Load the fdt into the larger buffer */
-	fdt_res = fdt_open_into(&(*cert_blob)->fdt, &new_blob->fdt,
+	fdt_res = fdt_open_into(&(*attest_blob)->fdt, &new_blob->fdt,
 				new_fdt_size);
 	if (fdt_res < 0) {
 		free(new_blob);
@@ -324,28 +307,35 @@ static TEE_Result expand_cert_fdt(struct attestation_cert_blob **cert_blob)
 	}
 
 	/* Switch to the new buffer */
-	free(*cert_blob);
-	*cert_blob = new_blob;
+	free(*attest_blob);
+	*attest_blob = new_blob;
 
 	return TEE_SUCCESS;
 }
 
 /*
  * Insert a new certificate into a group. If the fdt is too small it will
- * clean up after itself and retrun TEE_ERROR_OUT_OF_MEMORY;
+ * clean up after itself and retrun TEE_ERROR_OUT_OF_MEMORY. The new node
+ * will link back to the issuing node if issuer_node_offset is valid,
+ * otherwise it will link to itself.
  */
-static TEE_Result create_certificate_fdt(struct attestation_cert_blob **cert_blob,
-					 int root_node_offset,
-					 int issuer_node_offset,
-					 struct attestation_cert_data *cert)
+static TEE_Result insert_certificate(struct attest_db **attest_blob,
+				     int root_node_offset,
+				     int issuer_node_offset,
+				     struct attestation_cert_data *cert)
 {
 	int cert_id = 0;
-	int issuer_phandle = 0;
-	struct fdt_header *fdt = &(*cert_blob)->fdt;
+	int issuer_phandle = -1;
+	struct fdt_header *fdt = &(*attest_blob)->fdt;
 	int fdt_res = 0;
 	int new_node = 0;
 	int current_phandle = -1;
-	char node_name[20];
+	char node_name[20] = {0};
+
+	/* Grab the issuer phandle before we move or add anything to the fdt */
+	if (issuer_node_offset > 0) {
+		issuer_phandle = fdt_get_phandle(fdt, issuer_node_offset);
+	}
 
 	/* Find an empty slot for the new cert */
 	do {
@@ -353,13 +343,15 @@ static TEE_Result create_certificate_fdt(struct attestation_cert_blob **cert_blo
 		snprintf(node_name, sizeof(node_name), "cert-%d", cert_id);
 		fdt_res = fdt_add_subnode(fdt, root_node_offset, node_name);
 	} while (fdt_res == -FDT_ERR_EXISTS);
-
 	if (fdt_res < 0)
 		return fdt_error(fdt_res);
 	
 	new_node = fdt_res;
 	
-	/* Get a phandle so we can reference these nodes later */
+	/*
+	 * Get a phandle so we can reference the node later. OP-TEE does not
+	 * have a function to set phandles, do it manually
+	 */
 	current_phandle = fdt_get_max_phandle(fdt);
 	if (current_phandle < 0) {
 		fdt_res = current_phandle;
@@ -369,37 +361,26 @@ static TEE_Result create_certificate_fdt(struct attestation_cert_blob **cert_blo
 				  current_phandle + 1);
 	if (fdt_res < 0)
 		goto cleanup;
-//TODO: Handle Errors better here!
-	/* Populate the certificate information */
-	fdt_res = fdt_setprop_string(fdt, new_node, "subject",
-				     cert->subject);
-	if (fdt_res < 0)
-		goto cleanup;
 
-	if (issuer_node_offset > 0) {
-		/* Find the issuer and link using phandles */
-		issuer_phandle = fdt_get_phandle(fdt, issuer_node_offset);
-	} else {
-		/* Self signed, link back to itself */
+	/* Link the node to its parent via phandle */
+	if (issuer_phandle < 0) {
+		/* No issuer from before, this node will link to itself */
 		issuer_phandle = fdt_get_phandle(fdt, new_node);
 	}
 	fdt_res = fdt_setprop_u32(fdt, new_node, "issuer", issuer_phandle);
 	if (fdt_res < 0)
 		goto cleanup;
 
-	int temp_off = fdt_node_offset_by_phandle(fdt, current_phandle + 1);
-	fdt_res = fdt_setprop(fdt, new_node, "fwid", cert->subject_fwid,
-			      sizeof(cert->subject_fwid));
-	temp_off = fdt_node_offset_by_phandle(fdt, current_phandle + 1);
-
-	const uint8_t *f = fdt_getprop(fdt, new_node, "fwid", NULL);
-
-	EMSG("%x", (uint32_t)f);
-	EMSG("%d", temp_off);
-
+	/* Populate the certificate information */
+	fdt_res = fdt_setprop_string(fdt, new_node, "subject",
+				     cert->subject);
 	if (fdt_res < 0)
 		goto cleanup;
-	
+
+	fdt_res = fdt_setprop(fdt, new_node, "fwid", cert->subject_fwid,
+			      sizeof(cert->subject_fwid));
+	if (fdt_res < 0)
+		goto cleanup;
 	fdt_res = fdt_setprop_string(fdt, new_node, "pem", cert->pem);
 	if (fdt_res < 0)
 		goto cleanup;
@@ -407,46 +388,117 @@ static TEE_Result create_certificate_fdt(struct attestation_cert_blob **cert_blo
 	return TEE_SUCCESS;
 	
 cleanup:
-	/* Delete the node, if we ran out of memory we will try again */
+	/* Delete partial nodes, if we ran out of memory try again later */
 	fdt_del_node(fdt, new_node);
 	return fdt_error(fdt_res);
 }
 
-
-TEE_Result add_cert_fdt(struct attestation_cert_blob **cert_blob,
-			       struct attestation_cert_data *cert)
+TEE_Result attest_db_get_cert(struct attest_db **attest_blob,
+			      uint8_t *fwid, size_t fwid_len,
+			      struct attestation_cert_data *cert)
 {
-	
-	int root = 0;
-	int cert_node = 0;
+	TEE_Result res = TEE_ERROR_GENERIC;
+
 	struct fdt_header *fdt = NULL;
+	int cert_node = 0;
+
+	mutex_read_lock(&cert_db_mutex);
+
+	fdt = &(*attest_blob)->fdt;
+
+	if (!cert) {
+		res = TEE_ERROR_BAD_PARAMETERS;
+		goto err;
+	}
+
+	/* Check if any certificate exists with a matching fwid */
+	cert_node = fdt_node_offset_by_prop_value(fdt, 0, "fwid",
+						  fwid, fwid_len);
+	if (cert_node == -FDT_ERR_NOTFOUND) {
+		res = TEE_ERROR_ITEM_NOT_FOUND;
+		goto err;
+	}
+	if (cert_node < 0) {
+		res = fdt_error(cert_node);
+		goto err;
+	}
+
+	/*
+	 * We have a match, get the data.
+	 */
+	res = get_cert_data(attest_blob, cert_node, cert);
+err:
+	mutex_read_unlock(&cert_db_mutex);
+
+	return res;
+}
+
+TEE_Result attest_db_get_chain(struct attest_db **attest_blob,
+			       uint8_t *fwid, size_t fwid_len, char *buf,
+			       size_t *buf_size)
+{
+	TEE_Result res = TEE_ERROR_GENERIC;
+	struct fdt_header *fdt = NULL;
+	int leaf_offset = -1;
+	int root_offs;
+
+	mutex_read_lock(&cert_db_mutex);
+
+	fdt = &(*attest_blob)->fdt;
+	root_offs = fdt_subnode_offset(fdt, /* root */ 0, "certs");
+	if (root_offs < 0) {
+		res = fdt_error(leaf_offset);
+		goto err;
+	}
+
+	leaf_offset = fdt_node_offset_by_prop_value(fdt, root_offs, "fwid",
+						    fwid, fwid_len);
+	if (leaf_offset < 0) {
+		res = fdt_error(leaf_offset);
+		goto err;
+	}
+
+	res = get_chain_pems(attest_blob, leaf_offset, buf, buf_size);
+err:
+	mutex_read_unlock(&cert_db_mutex);
+	return res;
+}
+
+TEE_Result attest_db_add_cert(struct attest_db **attest_blob,
+			      struct attestation_cert_data *cert)
+{
+	TEE_Result res = TEE_ERROR_GENERIC;
+
+	struct fdt_header *fdt = NULL;
+	int root_offs = 0;
+	int cert_node = 0;
 	int issuer = 0;
-	TEE_Result res = TEE_SUCCESS;
 
 	mutex_lock(&cert_db_mutex);
 
-	while (true) {
+	do {
 		/*
 		 * Find the certificate group and fdt. The fdt may have moved
 		 * after a resize.
 		 */
-		fdt = &(*cert_blob)->fdt;
-		root = fdt_subnode_offset(fdt, /* root */ 0,
-						"certs");
-		if (root < 0) {
-			res = fdt_error(root);
+		fdt = &(*attest_blob)->fdt;
+		root_offs = fdt_subnode_offset(fdt, /* root */ 0,
+					       "certs");
+		if (root_offs < 0) {
+			res = fdt_error(root_offs);
 			goto cleanup;
 		}
 
 		/*
-		 * Don't bother adding a duplicate certificate
+		 * Don't bother adding a duplicate certificate, but verify it
+		 * is identical.
 		 */
-		res = check_uniquness_fdt(cert_blob, root, cert,
-					  &cert_node);
+		res = check_uniquness(attest_blob, root_offs, cert,
+				      &cert_node);
 		if (res)
 			goto cleanup;
-		if (cert_node) {
-			DMSG("Don't add duplicate cert");
+		if (cert_node > 0) {
+			DMSG("Re-using identical certificate");
 			res = TEE_SUCCESS;
 			goto cleanup;
 		}
@@ -455,8 +507,7 @@ TEE_Result add_cert_fdt(struct attestation_cert_blob **cert_blob,
 		 * Try and find the issuer, if one exists (otherwise it might 
 		 * be a new root). Two certificates may not have the same fwid.
 		 */
-		issuer = fdt_node_offset_by_prop_value(fdt, root,
-						       "fwid",
+		issuer = fdt_node_offset_by_prop_value(fdt, root_offs, "fwid",
 						       cert->issuer_fwid,
 						       sizeof(cert->issuer_fwid));
 		if (issuer < 0 && issuer != -FDT_ERR_NOTFOUND) {
@@ -464,29 +515,24 @@ TEE_Result add_cert_fdt(struct attestation_cert_blob **cert_blob,
 			goto cleanup;
 		}
 		if (issuer < 0) {
-			/* Self signed certs are ok, leave them in the root */
+			/* Self signed certs are ok */
 			if (memcmp(cert->subject_fwid, cert->issuer_fwid,
 				   sizeof(cert->subject_fwid))) {
 				EMSG("Unknown issuer");
 				res = TEE_ERROR_BAD_PARAMETERS;
 				goto cleanup;
 			}
-		} else {
-			/* Verify the issuer name is correct */
-			/* Place the new node under its parrent */
-			root = issuer;
-		}		
+		}
 
-		res = create_certificate_fdt(cert_blob, root, issuer, cert);
+		res = insert_certificate(attest_blob, root_offs, issuer, cert);
 		/* May need to expand the fdt and try again */
 		if (res == TEE_ERROR_OUT_OF_MEMORY) {
-			res = expand_cert_fdt(cert_blob);
+			res = expand_blob(attest_blob);
 			if (res)
 				goto cleanup;
-			continue;
-		} else
-			goto cleanup;
-	} while (true);
+			res = TEE_ERROR_OUT_OF_MEMORY;
+		}
+	} while (res == TEE_ERROR_OUT_OF_MEMORY);
 
 cleanup:
 	mutex_unlock(&cert_db_mutex);
@@ -494,21 +540,21 @@ cleanup:
 	return res;
 }
 
-TEE_Result initialize_empty_fdt(struct attestation_cert_blob **cert_blob)
+TEE_Result attest_db_initialize(struct attest_db **attest_blob)
 {
 	int alloc_size = 0;
 	int fdt_res = 0;
 	int fdt_size = 0;
 	struct fdt_header *fdt = NULL;
-	struct attestation_cert_blob *new_blob = NULL;
+	struct attest_db *new_blob = NULL;
 	TEE_Result tee_res = TEE_SUCCESS;
 
 	mutex_lock(&cert_db_mutex);
 
-	alloc_size = sizeof(struct attestation_cert_blob) +
+	alloc_size = sizeof(struct attest_db) +
 		     CERT_DB_ALLOC_SIZE;
 	/* The fdt can use all of the _body[] and the fdt structure */
-	fdt_size = alloc_size - sizeof(struct attestation_cert_blob) +
+	fdt_size = alloc_size - sizeof(struct attest_db) +
 		   sizeof(struct fdt_header);
 
 	new_blob = calloc(1, alloc_size);
@@ -541,7 +587,7 @@ TEE_Result initialize_empty_fdt(struct attestation_cert_blob **cert_blob)
 		goto error;
 	}
 
-	*cert_blob = new_blob;
+	*attest_blob = new_blob;
 	mutex_unlock(&cert_db_mutex);
 	return TEE_SUCCESS;
 error:
