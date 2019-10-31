@@ -672,39 +672,105 @@ TEE_Result attest_db_add_cert(struct attest_db **attest_blob,
 
 	return res;
 }
+
+TEE_Result attest_db_set_misc_data(struct attest_db **attest_blob,
+				   uint8_t *fwid, size_t fwid_len,
+				   uint8_t *misc_data, size_t data_len)
+{
+	TEE_Result res = TEE_ERROR_GENERIC;
+	int fdt_res = -FDT_ERR_NOTFOUND;
 	struct fdt_header *fdt = NULL;
-	int root_offs = 0;
 	int cert_node = 0;
-	int issuer = 0;
+	bool retry = false;
+
+	if (!attest_blob || !(*attest_blob) || !fwid)
+		return TEE_ERROR_BAD_PARAMETERS;
 
 	mutex_lock(&cert_db_mutex);
 
 	do {
-		/*
-		 * Find the certificate group and fdt. The fdt may have moved
-		 * after a resize.
-		 */
+		/* Expanding may move the fdt, reset pointer */
 		fdt = &(*attest_blob)->fdt;
-		root_offs = fdt_subnode_offset(fdt, /* root */ 0,
-					       "certs");
-		if (root_offs < 0) {
-			res = fdt_error(root_offs);
-			goto cleanup;
+
+		/* Check if any certificate exists with a matching fwid */
+		cert_node = fdt_node_offset_by_prop_value(fdt, 0, "fwid",
+							  fwid, fwid_len);
+		if (cert_node == -FDT_ERR_NOTFOUND) {
+			res = TEE_ERROR_ITEM_NOT_FOUND;
+			goto err;
+		}
+		if (cert_node < 0) {
+			res = fdt_error(cert_node);
+			goto err;
 		}
 
-		/*
-		 * Don't bother adding a duplicate certificate, but verify it
-		 * is identical.
-		 */
-		res = check_uniquness(attest_blob, root_offs, cert,
-				      &cert_node);
-		if (res)
-			goto cleanup;
-		if (cert_node > 0) {
-			DMSG("Re-using identical certificate");
-			res = TEE_SUCCESS;
-			goto cleanup;
+		fdt_res = fdt_setprop(fdt, cert_node, "misc_data",
+				      misc_data, data_len);
+		if (fdt_res == -FDT_ERR_NOSPACE) {
+			res = expand_blob(attest_blob);
+			if (res)
+				goto err;
+			retry = true;
+		} else {
+			res = fdt_error(fdt_res);
+			retry = false;
 		}
+	} while (retry);
+err:
+	mutex_unlock(&cert_db_mutex);
+	return res;
+}
+
+TEE_Result attest_db_get_misc_data(struct attest_db **attest_blob,
+				   uint8_t *fwid, size_t fwid_len,
+				   uint8_t *misc_data, size_t *data_len)
+{
+	TEE_Result res = TEE_ERROR_GENERIC;
+	int fdt_res = -FDT_ERR_NOTFOUND;
+	struct fdt_header *fdt = NULL;
+	int cert_node = 0;
+	const uint8_t *data = NULL;
+
+	if (!attest_blob || !(*attest_blob) || !fwid || !data_len)
+		return TEE_ERROR_BAD_PARAMETERS;
+
+	mutex_read_lock(&cert_db_mutex);
+
+	fdt = &(*attest_blob)->fdt;
+
+	/* Check if any certificate exists with a matching fwid */
+	cert_node = fdt_node_offset_by_prop_value(fdt, 0, "fwid", fwid,
+						  fwid_len);
+	if (cert_node == -FDT_ERR_NOTFOUND) {
+		res = TEE_ERROR_ITEM_NOT_FOUND;
+		goto err;
+	}
+	if (cert_node < 0) {
+		res = fdt_error(cert_node);
+		goto err;
+	}
+
+	data = fdt_getprop(fdt, cert_node, "misc_data", &fdt_res);
+	if (!data) {
+		res = fdt_error(fdt_res);
+		goto err;
+	}
+
+	if ((size_t)fdt_res > *data_len) {
+		res = TEE_ERROR_SHORT_BUFFER;
+		*data_len = fdt_res;
+		goto err;
+	}
+
+	*data_len = fdt_res;
+	if (data)
+		memcpy(misc_data, data, *data_len);
+
+	res = TEE_SUCCESS;
+err:
+	mutex_read_unlock(&cert_db_mutex);
+	return res;
+}
 
 TEE_Result attest_db_inject_fdt(struct attest_db **attest_blob, void *baked_fdt)
 {

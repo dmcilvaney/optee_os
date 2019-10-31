@@ -131,6 +131,22 @@ TEE_Result attest_db_add_cert(struct attest_db **attest_blob,
 			      struct attestation_cert_data *cert);
 
 /*
+ * For a given cert structure, set the optional extra data property to
+ * equal misc_data. NOTE: This is not private data.
+ */
+TEE_Result attest_db_set_misc_data(struct attest_db **attest_blob,
+				   uint8_t *fwid, size_t fwid_len,
+				   uint8_t *misc_data, size_t data_len);
+
+/*
+ * For a given cert structure, get previously stored extra data. Return
+ * TEE_ERROR_SHORT_BUFFER if misc_data is too small, sets len to the required
+ * length.
+ */
+TEE_Result attest_db_get_misc_data(struct attest_db **attest_blob,
+				   uint8_t *fwid, size_t fwid_len,
+				   uint8_t *misc_data, size_t *data_len);
+
 /*
  * Populate the certificate for a given fwid value.
  */

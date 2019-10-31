@@ -335,6 +335,9 @@ static void test_cert_chain(void)
 	uint8_t baz_fwid[] = "BAZ FWID";
 	uint8_t bang_fwid[] = "BANG FWID";
 	uint8_t wizz_fwid[] = "WIZZ FWID";
+	uint8_t misc_data[] = "MISC DATA FOR BAZ";
+	uint8_t *data_back = NULL;
+	size_t data_back_len = 0;
 
 	cert = calloc(1, sizeof(*cert));
 	optee_fwid = ((struct attestation_state *)optee_data.plat_data)->fwid;
@@ -348,6 +351,27 @@ static void test_cert_chain(void)
 	res = attest_db_add_cert(&cert_blob, cert);
 	if (res != TEE_SUCCESS)
 		panic("cert test fail");
+
+	res = attest_db_set_misc_data(&cert_blob, cert->subject_fwid,
+				      sizeof(cert->subject_fwid), misc_data,
+				      sizeof(misc_data));
+	if (res != TEE_SUCCESS)
+		panic("cert test fail");
+	res = attest_db_get_misc_data(&cert_blob, cert->subject_fwid,
+				      sizeof(cert->subject_fwid), NULL,
+				      &data_back_len);
+	if (res != TEE_ERROR_SHORT_BUFFER)
+		panic("cert test fail");
+	data_back = malloc(data_back_len);
+	res = attest_db_get_misc_data(&cert_blob, cert->subject_fwid,
+				      sizeof(cert->subject_fwid), data_back,
+				      &data_back_len);
+	if (res != TEE_SUCCESS)
+		panic("cert test fail");
+	if (memcmp(data_back, misc_data, data_back_len) ||
+	    data_back_len != sizeof(misc_data))
+		panic("cert test fail");
+	free(data_back);
 
 	memset(cert, 0, sizeof(*cert));
 	strlcpy(cert->issuer, "optee", sizeof(cert->issuer));
