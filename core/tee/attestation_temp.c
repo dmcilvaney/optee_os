@@ -28,8 +28,8 @@ struct attestation_state {
 	uint8_t fwid[ATTESTATION_MEASUREMENT_SIZE];
 };
 
-__weak TEE_Result attestation_get_certs(struct attestation_alias_data *ctx,
-					char *buf, size_t *buf_len)
+__weak TEE_Result attestation_get_ta_certs(struct attestation_alias_data *ctx,
+					   char *buf, size_t *buf_len)
 {
 	uint8_t *fwid = NULL;
 
@@ -41,6 +41,14 @@ __weak TEE_Result attestation_get_certs(struct attestation_alias_data *ctx,
 				   ATTESTATION_MEASUREMENT_SIZE, buf, buf_len);
 }
 
+__weak TEE_Result attestation_get_all_certs(struct attestation_alias_data *ctx,
+					    char *buf, size_t *buf_len)
+{
+	if (!buf_len || !ctx)
+		return TEE_ERROR_BAD_PARAMETERS;
+
+	return attest_db_get_tree(&cert_blob, buf, buf_len);
+}
 
 
 __weak TEE_Result attestation_create_alias(struct attestation_alias_data *ctx)
@@ -165,10 +173,12 @@ static TEE_Result add_optee_root(void)
 	char temp_pem[] = "-----BEGIN CERTIFICATE-----\n"
 			  "OPTEE PEM\n"
 			  "-----END CERTIFICATE-----"; //TODO
-
-	optee_data.plat_data = calloc(1, sizeof(struct attestation_state));
-	if (!optee_data.plat_data)
-		return TEE_ERROR_OUT_OF_MEMORY;
+	if (!optee_data.plat_data) {
+		optee_data.plat_data = calloc(1,
+					      sizeof(struct attestation_state));
+		if (!optee_data.plat_data)
+			return TEE_ERROR_OUT_OF_MEMORY;
+	}
 
 	/*
 	 * Derive a root of trust for this device from the HUK. Ideally
@@ -252,9 +262,9 @@ static void test_cert_chain(void)
 	char test_data[] = "-----BEGIN CERTIFICATE-----\n"
 			   "TEST PEM\n"
 			   "-----END CERTIFICATE-----";
-	char baz_fwid[] = "BAZ FWID";
-	char bang_fwid[] = "BANG FWID";
-	char wizz_fwid[] = "WIZZ FWID";
+	uint8_t baz_fwid[] = "BAZ FWID";
+	uint8_t bang_fwid[] = "BANG FWID";
+	uint8_t wizz_fwid[] = "WIZZ FWID";
 
 	cert = calloc(1, sizeof(*cert));
 	optee_fwid = ((struct attestation_state *)optee_data.plat_data)->fwid;
@@ -294,6 +304,7 @@ static void test_cert_chain(void)
 	if (res != TEE_SUCCESS)
 		panic("cert test fail");
 
+	/* Create a non-unique cert for an existing fwid */
 	cert->pem[0] += 1;
 	res = attest_db_add_cert(&cert_blob, cert);
 	if (res != TEE_ERROR_SECURITY)
@@ -304,17 +315,21 @@ static void test_cert_chain(void)
 
 static TEE_Result attestation_initialization(void)
 {
+	TEE_Result res = TEE_ERROR_GENERIC;
+
 	/*
 	 * Platform specific method to pick up private certificate data.
 	 * Default implementation will initialize a new certificate chain.
 	 */
-	initialize_cert_chain();
+	res = initialize_cert_chain();
+	if (res)
+		return res;
 
 	test_cert_chain();
 
-	attest_db_dump(&cert_blob);
+	res = attest_db_dump(&cert_blob);
 
-	return TEE_SUCCESS;
+	return res;
 }
 
 service_init_late(attestation_initialization);

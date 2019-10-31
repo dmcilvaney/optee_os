@@ -23,7 +23,7 @@ static TEE_Result trust_get_certs(
 	size_t buf_len = 0;
 	char *buf = NULL;
 
-	res = attestation_get_certs(ctx, NULL, &buf_len);
+	res = attestation_get_ta_certs(ctx, NULL, &buf_len);
 	if (res)
 		return res;
 
@@ -31,10 +31,27 @@ static TEE_Result trust_get_certs(
 	buf = malloc(buf_len);
 	if(!buf)
 		return TEE_ERROR_OUT_OF_MEMORY;
-	res = attestation_get_certs(ctx, buf, &buf_len);
-	if(!res) {
+	res = attestation_get_ta_certs(ctx, buf, &buf_len);
+	if (!res) {
 		DMSG("Got the string back:");
-		DMSG("%s", buf);
+		trace_ext_puts(buf);
+		trace_ext_puts("\n");
+	}
+	free(buf);
+
+	res = attestation_get_all_certs(ctx, NULL, &buf_len);
+	if (res)
+		return res;
+
+	DMSG("Making buffer of length %d", buf_len);
+	buf = malloc(buf_len);
+	if (!buf)
+		return TEE_ERROR_OUT_OF_MEMORY;
+	res = attestation_get_all_certs(ctx, buf, &buf_len);
+	if (!res) {
+		DMSG("Got the string back:");
+		trace_ext_puts(buf);
+		trace_ext_puts("\n");
 	}
 	free(buf);
 

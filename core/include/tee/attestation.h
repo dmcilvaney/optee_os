@@ -164,8 +164,16 @@ TEE_Result attestation_start(struct attestation_alias_data *ctx);
  */
 TEE_Result attestation_create_alias(struct attestation_alias_data *ctx);
 
-TEE_Result attestation_get_certs(struct attestation_alias_data *ctx,
-				 char *buf, size_t *buf_len);
+/*
+ * Get a string containing the attestation certificates for the current TA.
+ */
+TEE_Result attestation_get_ta_certs(struct attestation_alias_data *ctx,
+				    char *buf, size_t *buf_len);
+/*
+ * Get a string containing all stored attestation certificates.
+ */
+TEE_Result attestation_get_all_certs(struct attestation_alias_data *ctx,
+				     char *buf, size_t *buf_len);
 
 void attestation_cleanup(struct attestation_alias_data *ctx);
 
