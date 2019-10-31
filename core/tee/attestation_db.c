@@ -706,40 +706,46 @@ TEE_Result attest_db_add_cert(struct attest_db **attest_blob,
 			goto cleanup;
 		}
 
-		/*
-		 * Try and find the issuer, if one exists (otherwise it might 
-		 * be a new root). Two certificates may not have the same fwid.
-		 */
-		issuer = fdt_node_offset_by_prop_value(fdt, root_offs, "fwid",
-						       cert->issuer_fwid,
-						       sizeof(cert->issuer_fwid));
-		if (issuer < 0 && issuer != -FDT_ERR_NOTFOUND) {
-			res = fdt_error(issuer);
-			goto cleanup;
-		}
-		if (issuer < 0) {
-			/* Self signed certs are ok */
-			if (memcmp(cert->subject_fwid, cert->issuer_fwid,
-				   sizeof(cert->subject_fwid))) {
-				EMSG("Unknown issuer");
-				res = TEE_ERROR_BAD_PARAMETERS;
-				goto cleanup;
-			}
-		}
+TEE_Result attest_db_inject_fdt(struct attest_db **attest_blob, void *baked_fdt)
+{
+	TEE_Result res = TEE_ERROR_GENERIC;
+	int baked_certs_off = -FDT_ERR_NOTFOUND;
+	int baked_node_off = -FDT_ERR_NOTFOUND;
+	struct attestation_cert_data *cert = NULL;
 
-		res = insert_certificate(attest_blob, root_offs, issuer, cert);
-		/* May need to expand the fdt and try again */
-		if (res == TEE_ERROR_OUT_OF_MEMORY) {
-			res = expand_blob(attest_blob);
-			if (res)
-				goto cleanup;
-			res = TEE_ERROR_OUT_OF_MEMORY;
-		}
-	} while (res == TEE_ERROR_OUT_OF_MEMORY);
+	if (!attest_blob || !(*attest_blob) || !baked_fdt)
+		return TEE_ERROR_BAD_PARAMETERS;
 
-cleanup:
+	mutex_lock(&cert_db_mutex);
+
+	/* Find certs node in the pre-baked fdt */
+	baked_certs_off = fdt_subnode_offset(baked_fdt, /* root */ 0,
+					     "certs");
+	if (baked_certs_off < 0) {
+		res = fdt_error(baked_certs_off);
+		goto err;
+	}
+
+	cert = calloc(1, sizeof(*cert));
+	if (!cert) {
+		res = TEE_ERROR_OUT_OF_MEMORY;
+		goto err;
+	}
+
+	/* Try to add each certificate one at a time to the true fdt */
+	fdt_for_each_subnode(baked_node_off, baked_fdt, baked_certs_off) {
+		res = get_cert_data(baked_fdt, baked_node_off, cert);
+		if (res)
+			goto err;
+		res = insert_certificate(attest_blob, cert);
+		if (res)
+			goto err;
+	}
+
+	if (baked_node_off < 0 && (baked_node_off != -FDT_ERR_NOTFOUND))
+		res = TEE_ERROR_BAD_STATE;
+err:
 	mutex_unlock(&cert_db_mutex);
-
 	return res;
 }
 

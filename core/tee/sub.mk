@@ -44,6 +44,26 @@ srcs-$(CFG_GP_SOCKETS) += socket.c
 srcs-$(CFG_ATTESTATION_MEASURE) += attestation_temp.c
 srcs-$(CFG_ATTESTATION_MEASURE) += attestation_db.c
 
+ifeq ($(CFG_ATTESTATION_PREBAKED),y)
+# Allow a pre-generated attestation root of trust to be baked into the OP-TEE
+# image at compile time. If this is used for a secure device it is critical to
+# protect the comiled binaries which include the root of trust.
+attestation-test-fdt-dts = $(CFG_ATTESTATION_PREBAKED_FILE)
+attestation-test-fdt-dtb = $(sub-dir-out)/attestation_test_dtb.dtb
+attestation-test-fdt-c = $(sub-dir-out)/attestation_test_dtb.c
+
+gensrcs-y += attestation_test_dtb
+cleanfiles += $(attestation-test-fdt-c) $(attestation-test-fdt-dtb)
+produce-attestation_test_dtb = attestation_test_dtb.c
+depends-attestation_test_dtb = $(attestation-test-fdt-dtb) \
+				scripts/bin_to_c.py
+recipe-attestation_test_dtb = scripts/bin_to_c.py \
+				--bin $(attestation-test-fdt-dtb) \
+				--vname attestation_prebaked_fdt \
+				--out $(attestation-test-fdt-c)
+$(eval $(call gen-dtb-file,$(attestation-test-fdt-dts),$(attestation-test-fdt-dtb)))
+endif
+
 endif #CFG_WITH_USER_TA,y
 
 srcs-y += uuid.c

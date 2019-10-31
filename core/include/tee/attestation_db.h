@@ -112,6 +112,12 @@ struct attest_db {
 TEE_Result attest_db_initialize(struct attest_db **attest_blob);
 
 /*
+ * Inject attestation data from an fdt into the database. Each certificate in
+ * new_fdt will be copied out and placed into the certificate database. Each
+ * cert is validated in the same way new certificates are validated in
+ * attest_db_add_cert().
+ */
+TEE_Result attest_db_inject_fdt(struct attest_db **attest_blob, void *new_fdt);
 
 /*
  * Add a certificate to the database if it is not present. Ensure that if a

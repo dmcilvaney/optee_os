@@ -24,6 +24,10 @@
 static struct attest_db *cert_blob;
 static struct attestation_alias_data optee_data;
 
+#ifdef CFG_ATTESTATION_PREBAKED
+extern const uint8_t attestation_prebaked_fdt[];
+#endif
+
 struct attestation_state {
 	uint8_t fwid[ATTESTATION_MEASUREMENT_SIZE];
 };
@@ -163,6 +167,65 @@ __weak TEE_Result attestation_start(struct attestation_alias_data *ctx)
 	return TEE_SUCCESS;
 }
 
+#ifdef CFG_ATTESTATION_PREBAKED
+/*
+ * See attestation_db.h for details.
+ *
+ * Initialize the attestation database with a premade database image which is
+ * compiled into OP-TEE. This premade image should contain at least a node
+ * for OP-TEE, along with OP-TEE's private data.
+ */
+static TEE_Result initialize_prebaked_chain(void)
+{
+	TEE_Result res = TEE_ERROR_GENERIC;
+	struct attestation_state *optee_state = NULL;
+	void *prebaked_fdt = NULL;
+	const uint8_t *property;
+	int fdt_res = 0;
+
+	prebaked_fdt = (void *)attestation_prebaked_fdt;
+
+	if (!optee_data.plat_data) {
+		optee_data.plat_data = calloc(1,
+					      sizeof(struct attestation_state));
+		if (!optee_data.plat_data)
+			return TEE_ERROR_OUT_OF_MEMORY;
+	}
+	optee_state = (struct attestation_state *)optee_data.plat_data;
+
+	property = fdt_getprop(prebaked_fdt, 0, "optee_prebaked_alias",
+			       &fdt_res);
+	if (!property)
+		return TEE_ERROR_ITEM_NOT_FOUND;
+	if (fdt_res != sizeof(optee_data.alias_identity))
+		return TEE_ERROR_BAD_FORMAT;
+	memcpy(optee_data.alias_identity, property,
+	       sizeof(optee_data.alias_identity));
+	optee_data.has_alias = true;
+
+	property = fdt_getprop(prebaked_fdt, 0, "optee_prebaked_fwid",
+			       &fdt_res);
+	if (!property)
+		return TEE_ERROR_ITEM_NOT_FOUND;
+	if (fdt_res != sizeof(optee_state->fwid))
+		return TEE_ERROR_BAD_FORMAT;
+	memcpy(optee_state->fwid, property, sizeof(optee_state->fwid));
+
+	//TODO: Consume the pre-baked PEM encoded key for OP-TEE here!
+	property = fdt_getprop(prebaked_fdt, 0, "optee_prebaked_key_pem",
+			       &fdt_res);
+	if (!property)
+		return TEE_ERROR_ITEM_NOT_FOUND;
+	//if (fdt_res != sizeof(OPTEE PEM)
+	//	return TEE_ERROR_BAD_FORMAT;
+	//TODO: Extract key into optee_data.alias_key
+
+	res = attest_db_inject_fdt(&cert_blob, prebaked_fdt);
+	attest_db_dump(&cert_blob);
+
+	return res;
+}
+#else
 static TEE_Result add_optee_root(void)
 {
 	TEE_Result res;
@@ -225,6 +288,7 @@ static TEE_Result add_optee_root(void)
 	free(root_cert);
 	return res;
 }
+#endif /* CFG_ATTESTATION_PREBAKED */
 
 __weak TEE_Result initialize_cert_chain(void)
 {
@@ -240,8 +304,14 @@ __weak TEE_Result initialize_cert_chain(void)
 	if (res)
 		return res;
 
+#ifdef CFG_ATTESTATION_PREBAKED
+	/* Load a pre-build fdt from the OP-TEE binary. For testing purposes. */
+	res = initialize_prebaked_chain();
+#else
+
 	/* Add a self-signed certificate for OP-TEE */
 	res = add_optee_root();
+#endif
 	if (res)
 		goto error;
 
